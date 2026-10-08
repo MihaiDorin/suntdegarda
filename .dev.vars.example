@@ -1,0 +1,2 @@
+AUTH_SECRET=replace-with-the-original-secret-from-the-private-configuration-file
+BOOTSTRAP_TOKEN=replace-with-the-original-bootstrap-token-from-the-private-configuration-file
