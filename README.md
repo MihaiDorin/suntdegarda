@@ -7,15 +7,15 @@ Aplicația de programare a gărzilor, pregătită pentru **GitHub → Cloudflare
 - Un singur administrator: Pecie Mihai, cu adresa `pmihaidorin@gmail.com`.
 - Listă de medici gestionată exclusiv de administrator.
 - Prima accesare: alegerea medicului, email de recuperare și parolă. Ulterior: numele medicului și parola, cu suport pentru salvarea în browser.
-- Calendarul lunii în curs ca pagină inițială, cu medicul de gardă în fiecare zi.
+- Vizualizarea lunii în curs ca pagină inițială, cu medicul de gardă în fiecare zi și selector rapid de lună.
 - Zile rotunjite: roșu pastel pentru nealese, verde pentru preferate, albastru pentru disponibilitate.
 - Resetarea tuturor conturilor fără pierderea gărzilor, preferințelor sau punctajelor.
-- Calendar anual și deschiderea/închiderea înscrierilor pe luni.
+- Deschiderea/închiderea înscrierilor pe luni; lista medicilor este un dropdown care reține ultima alegere.
 - Preferințe ordonate și cel puțin tot atâtea zile suplimentare disponibile.
 - Repartizare pe baza punctajului și rotației priorității la conflicte.
 - Punctaje de 1 pentru zile lucrătoare, 2 pentru weekend, 3 pentru sărbători.
-- Previzualizarea programului, zilelor neacoperite și punctajelor înainte de publicare.
-- Program definitiv și schimburi acceptate sau refuzate de colegi, cu notificări în aplicație.
+- Vizualizare pentru toți medicii: zile acoperite/neacoperite și repartizare live la 15 secunde pentru înscrierile deschise.
+- Program definitiv și schimburi acceptate sau refuzate de colegi, cu notificări în aplicație și push pe dispozitivele care au acordat permisiunea.
 - Confirmarea gărzilor efectuate și actualizarea punctajelor o singură dată.
 - Resetarea parolei de către administrator; recuperarea prin email poate fi activată separat.
 
@@ -140,3 +140,18 @@ Această versiune are autentificare prin numele medicului și parolă și interf
 - [Configurarea build-ului și variabilelor](https://developers.cloudflare.com/workers/ci-cd/builds/configuration/)
 - [Versiuni Node și pnpm](https://developers.cloudflare.com/workers/ci-cd/builds/build-image/)
 - [React + Vite pe Workers](https://developers.cloudflare.com/workers/framework-guides/web-apps/react/)
+
+## Notificări push pe telefon
+
+Actualizarea se publică automat în Cloudflare după commit pe `main`. Nu sunt necesare import SQL, cont la un furnizor de notificări sau chei adăugate manual. Cheia privată de notificări este generată o singură dată și păstrată în D1; nu apare în GitHub sau în răspunsurile API. Păstrează baza D1 existentă când actualizezi aplicația.
+
+1. Deschide aplicația și autentifică-te cu medicul și parola.
+2. **Android:** apasă **Activează notificările**, apoi **Permite**. Poți instala Garda pe ecranul principal din meniul Chrome.
+3. **iPhone (iOS 16.4+):** deschide adresa în Safari → **Partajare → Adaugă pe ecranul principal**. Deschide pictograma Garda, autentifică-te și apasă **Activează notificările → Permite**.
+4. Deschide clopoțelul din aplicație → **Trimite o probă** pentru a verifica telefonul. Permisiunea se acordă separat pe fiecare telefon/browser.
+
+Notificările anunță deschiderea/închiderea înscrierilor, confirmarea înscrierii proprii, definitivarea programului și cererile/răspunsurile de schimb. Sunt trimise prin Web Push standard, inclusiv când pagina este închisă; afișarea depinde de conexiunea telefonului și de setările sale de notificări/Focus.
+
+Cloudflare Cron verifică termenele și reîncearcă livrările la fiecare 5 minute. Închiderea manuală este anunțată imediat; închiderea automată poate avea o întârziere de până la 5 minute. Abonamentele expirate sunt eliminate automat. Deconectarea dezactivează notificările pentru medicul anterior pe acel browser; după schimbarea medicului, notificările se activează din nou pentru noul cont.
+
+Meniul principal: **Vizualizare → Înscrieri → Punctaje → Schimburi → Administrare** (ultima opțiune este disponibilă doar administratorului). În dropdown poți schimba medicul; pentru acces la noul cont este necesară parola lui. Culorile zilelor: roșu pentru nealese/neacoperite, verde pentru preferate/gărzile proprii, albastru pentru disponibilitate/gărzile colegilor, cu weekenduri mai intense.

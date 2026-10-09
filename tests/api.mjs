@@ -40,7 +40,7 @@ try{
  await call('a','reset-accounts',{confirmation:'RESETARE'},403);
  await call('admin','user-update',{id:ids.admin,active:0,base_points:0},400);
  await call('a','user-update',{id:admin.id,active:0,base_points:0},403);
- const unopened=await preview('admin',`${yearNumber}-10`);assert.equal(unopened.source,'empty');assert.equal(unopened.stats.covered,0);assert.equal(unopened.report.uncovered.length,31);await preview('admin',`${yearNumber}-99`,400);await preview('a',`${yearNumber}-11`,403);
+ const unopened=await preview('admin',`${yearNumber}-10`);assert.equal(unopened.source,'empty');assert.equal(unopened.stats.covered,0);assert.equal(unopened.report.uncovered.length,31);await preview('admin',`${yearNumber}-99`,400);await preview('a',`${yearNumber}-11`);
  await call('admin','month-open',{month:`${yearNumber}-11`,deadline:null});const openEmpty=await preview('admin',`${yearNumber}-11`);assert.equal(openEmpty.source,'simulation');assert.equal(openEmpty.stats.covered,0);
  await call('a','submit',{month:`${yearNumber}-11`,preferred:[1,2],available:[2,3]},400);
  const actors=['admin','a','b','c','d'];

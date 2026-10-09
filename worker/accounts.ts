@@ -57,6 +57,7 @@ export async function resetAccounts() {
     db().prepare("DELETE FROM sessions"),
     db().prepare("DELETE FROM resets"),
     db().prepare("DELETE FROM limits"),
+    db().prepare("DELETE FROM push_subscriptions"),
     db().prepare("UPDATE users SET email=CASE WHEN role='admin' AND listed=1 THEN ? ELSE 'unclaimed-'||id||'@garda.invalid' END,password=''").bind(ADMIN_EMAIL),
     db().prepare("DELETE FROM settings WHERE key='bootstrap_done'"),
     db().prepare("INSERT INTO settings(key,value) VALUES('owner_setup_token',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").bind(JSON.stringify({hash:await digest(token),expires:Date.now()+3600000})),

@@ -10,7 +10,7 @@ function rememberedName(doctors: DoctorProfile[]) {
   try { return doctors.find(d => d.id === localStorage.getItem(rememberedKey))?.name ?? ""; }
   catch { return ""; }
 }
-function rememberDoctor(id: string) {
+export function rememberDoctor(id: string) {
   try { localStorage.setItem(rememberedKey, id); } catch { /* Private browsing can disable storage. */ }
 }
 
@@ -52,7 +52,7 @@ export function Auth({ data, setupToken, resetToken, onDone, loadError }: { data
         {message && <div className="alert success" role="status">{message}</div>}
         {!data.setupComplete && !setup && <div className="alert">Administratorul trebuie să configureze contul său înainte de activarea celorlalți medici.</div>}
         <form onSubmit={submit}>
-          {!["forgot", "reset"].includes(effective) && <label>Medicul<input id="garda-username" name="username" list="garda-doctors" autoComplete="username" value={setup ? owner?.name ?? "" : doctorName} readOnly={setup} onChange={event => { setDoctorName(event.target.value); setError(""); setMessage(""); }} placeholder="Alege numele din listă" required/><datalist id="garda-doctors">{data.doctors.map(d => <option key={d.id} value={d.name}/>)}</datalist></label>}
+          {!["forgot", "reset"].includes(effective) && <label>Medicul<select id="garda-username" name="username" autoComplete="username" value={setup ? owner?.name ?? "" : doctorName} onChange={event => { const name = event.target.value; setDoctorName(name); const doctor = data.doctors.find(d => d.name === name); if (doctor) rememberDoctor(doctor.id); setError(""); setMessage(""); }} required><option value="" disabled>Alege numele din listă</option>{data.doctors.map(d => <option key={d.id} value={d.name} disabled={setup && !d.administrator}>{d.name}</option>)}</select></label>}
           {["register", "setup", "forgot"].includes(effective) && <label>{effective === "forgot" ? "Email de recuperare" : "Adresă de email pentru recuperarea parolei"}<input name="email" type="email" required autoComplete="email" defaultValue={effective === "setup" ? ADMIN_EMAIL : ""} readOnly={effective === "setup"} placeholder="nume@exemplu.ro"/></label>}
           {!["forgot", "owner-needed"].includes(effective) && <label>Parolă<div className="password-input"><input name="password" type={show ? "text" : "password"} required minLength={effective === "login" ? 1 : 10} maxLength={128} autoComplete={effective === "login" ? "current-password" : "new-password"} placeholder={effective === "login" ? "Parola ta" : "Minimum 10 caractere"}/><button type="button" aria-label={show ? "Ascunde parola" : "Arată parola"} onClick={() => setShow(!show)}>{show ? <EyeOff size={18}/> : <Eye size={18}/>}</button></div></label>}
           {effective === "login" && <button type="button" className="text-btn forgot" onClick={() => { setMode("forgot"); setError(""); }}>Am uitat parola</button>}
