@@ -7,6 +7,7 @@
   "workers_dev": true,
   "keep_vars": true,
   "preview_urls": false,
+  "triggers": { "crons": ["*/5 * * * *"] },
   "assets": {
     "binding": "ASSETS",
     "not_found_handling": "single-page-application",
