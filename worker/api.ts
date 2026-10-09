@@ -1,5 +1,7 @@
 import { z } from "zod";
-import { db,runtime,uuid,now,digest,hashPassword,passwordOK,currentUser,session,cookie,fail,AppError,rateLimit,notification,audit,safeUser,randomToken,equal,type User } from "@/lib/server";
+import { db,runtime,uuid,now,digest,hashPassword,passwordOK,currentUser,session,cookie,fail,AppError,rateLimit,notification,audit,safeUser,randomToken,isAdmin,type User } from "@/lib/server";
+import { ADMIN_EMAIL,normalizeDoctorName,unclaimedEmail } from "@/lib/team";
+import { setupComplete as setupDone,publicDoctors,validSetupToken,resetAccounts } from "./accounts";
 import { allocate,type Participant } from "@/lib/scheduler";
 import { getMonthPreview } from "@/lib/preview";
 import { monthDays,monthTitle,dateKey,dateLabel,holidayMap,dayPoints,validateSelection,todayRO } from "@/lib/calendar";
@@ -11,11 +13,10 @@ const monthSchema=z.string().regex(/^20\d{2}-(0[1-9]|1[0-2])$/);
 const dateSchema=z.string().regex(/^20\d{2}-(0[1-9]|1[0-2])-\d{2}$/).refine(d=>{try{return new Date(d+"T12:00:00Z").toISOString().slice(0,10)===d;}catch{return false;}},"Dată invalidă");
 const emailSchema=z.string().trim().email().max(254).transform(v=>v.toLowerCase());
 const passwordSchema=z.string().min(10,"Parola trebuie să aibă minimum 10 caractere.").max(128);
-const credentials=z.object({email:emailSchema,password:passwordSchema,name:z.string().trim().min(2).max(80)});
+const credentials=z.object({doctor_id:z.string().min(1),email:emailSchema,password:passwordSchema});
 const json=(value:unknown,status=200,headers:Record<string,string>={})=>Response.json(value,{status,headers:{"Cache-Control":"no-store","X-Content-Type-Options":"nosniff",...headers}});
 const parseJSON=(s:string,fallback:unknown)=>{try{return JSON.parse(s);}catch{return fallback;}};
-async function setupDone(){return !!await db().prepare("SELECT value FROM settings WHERE key='bootstrap_done'").first();}
-async function pointsUsers(){return (await db().prepare("SELECT u.id,u.name,u.email,u.role,u.active,u.base_points,u.created,u.base_points+COALESCE(SUM(CASE WHEN s.completed=1 THEN s.points ELSE 0 END),0) AS points FROM users u LEFT JOIN shifts s ON s.user_id=u.id GROUP BY u.id ORDER BY points DESC,u.name COLLATE NOCASE").all()).results as (Omit<User,"password">&{points:number})[];}
+async function pointsUsers(){return (await db().prepare("SELECT u.id,u.name,u.email,u.role,u.active,u.listed,CASE WHEN u.password<>'' THEN 1 ELSE 0 END AS registered,u.base_points,u.created,u.base_points+COALESCE(SUM(CASE WHEN s.completed=1 THEN s.points ELSE 0 END),0) AS points FROM users u LEFT JOIN shifts s ON s.user_id=u.id GROUP BY u.id ORDER BY points DESC,u.name COLLATE NOCASE").all()).results as (Omit<User,"password">&{points:number;registered:number})[];}
 async function holidaysFor(year:number){return holidayMap(year,(await db().prepare("SELECT * FROM holidays WHERE date LIKE ?").bind(`${year}-%`).all()).results as {date:string;label:string;enabled:number}[]);}
 async function getMonth(id:string){const m=await db().prepare("SELECT * FROM months WHERE id=?").bind(id).first<Month>();if(!m)fail("Luna nu a fost deschisă încă.");return m;}
 function guard(m:Month,version:number){if(m.version!==version)fail("Datele au fost actualizate de altcineva. Reîncarcă și încearcă din nou.",409);}
@@ -25,14 +26,14 @@ export async function GET(request:Request){try{
  const user=await currentUser(request),setupComplete=await setupDone(),emailReady=!!(runtime("RESEND_API_KEY")&&runtime("MAIL_FROM"));
  if(new URL(request.url).searchParams.get("view")==="preview"){
   if(!user)fail("Autentifică-te pentru a vedea previzualizarea.",401);
-  if(!user.active||user.role!=="admin")fail("Previzualizarea este disponibilă administratorului.",403);
+  if(!user.active||!isAdmin(user))fail("Previzualizarea este disponibilă administratorului.",403);
   const month=monthSchema.parse(new URL(request.url).searchParams.get("month"));
   return json(await getMonthPreview(month));
  }
- if(!user)return json({me:null,setupComplete,emailReady});
+ if(!user)return json({me:null,setupComplete,emailReady,doctors:await publicDoctors()});
  if(!user.active)return json({me:safeUser(user),setupComplete,emailReady,pending:true});
  const year=z.coerce.number().int().min(2020).max(2099).parse(new URL(request.url).searchParams.get("year")??todayRO().slice(0,4));
- const admin=user.role==="admin";
+ const admin=isAdmin(user);
  const results=await Promise.all([
   pointsUsers(),db().prepare("SELECT id,status,deadline,version,report FROM months WHERE id LIKE ? ORDER BY id").bind(`${year}-%`).all(),
   db().prepare(`SELECT * FROM submissions WHERE month LIKE ? ${admin?"":"AND user_id=?"}`).bind(`${year}-%`,...(!admin?[user.id]:[])).all(),
@@ -44,7 +45,7 @@ export async function GET(request:Request){try{
   db().prepare("SELECT m.id FROM months m LEFT JOIN submissions s ON s.month=m.id AND s.user_id=? WHERE m.status='open' AND m.id>=? AND (m.deadline IS NULL OR m.deadline>?) AND s.id IS NULL ORDER BY m.id LIMIT 1").bind(user.id,todayRO().slice(0,7),now()).first<{id:string}>()
  ]);
  const [users,months,submissions,shifts,swaps,notifications,holidays,futureShifts,events,suggestion]=results;
- return json({me:safeUser(user),setupComplete,emailReady,suggestedMonth:suggestion?.id??null,users:users.filter(u=>admin||u.active).map(u=>({id:u.id,name:u.name,role:u.role,active:u.active,points:u.points,base_points:u.base_points,...(admin?{email:u.email}:{})})),months:months.results.map(m=>({...m,report:admin?parseJSON(String(m.report),{}):{}})),submissions:submissions.results.map(s=>({...s,preferred:parseJSON(String(s.preferred),[]),available:parseJSON(String(s.available),[])})),shifts:shifts.results,swaps:swaps.results,notifications:notifications.results,holidays,futureShifts:futureShifts.results,events:events.results,today:todayRO()});
+ return json({me:safeUser(user),setupComplete,emailReady,doctors:await publicDoctors(),accountResetPending:admin&&!await db().prepare("SELECT value FROM settings WHERE key='accounts_reset_v2'").first(),suggestedMonth:suggestion?.id??null,users:users.map(u=>({id:u.id,name:u.name,role:isAdmin(u)?"admin":"doctor",active:u.active,listed:u.listed,registered:u.registered,points:u.points,base_points:u.base_points,...(admin?{email:u.registered?u.email:undefined}:{})})),months:months.results.map(m=>({...m,report:admin?parseJSON(String(m.report),{}):{}})),submissions:submissions.results.map(s=>({...s,preferred:parseJSON(String(s.preferred),[]),available:parseJSON(String(s.available),[])})),shifts:shifts.results,swaps:swaps.results,notifications:notifications.results,holidays,futureShifts:futureShifts.results,events:events.results,today:todayRO()});
  }catch(error){return onError(error);}}
 
 export async function POST(request:Request){try{
@@ -54,33 +55,46 @@ export async function POST(request:Request){try{
  const raw=await request.text();if(raw.length>20000)fail("Cerere prea mare.",413);
  const body=JSON.parse(raw) as Record<string,unknown>;const action=z.string().parse(body.action);
  if(["register","login","setup","forgot","reset"].includes(action))await rateLimit(request,"auth",40);
- if(action==="setup"){
-  const c=credentials.extend({token:z.string().min(30)}).parse(body);
-  if(!runtime("BOOTSTRAP_TOKEN")||!equal(c.token,runtime("BOOTSTRAP_TOKEN")))fail("Linkul de configurare nu este valid.",403);
-  if(await setupDone())fail("Administratorul este deja configurat.",409);
-  const id=uuid(),pwd=await hashPassword(c.password);
-  const r=await db().batch([db().prepare("INSERT OR IGNORE INTO settings (key,value) VALUES ('bootstrap_done',?)").bind(id),db().prepare("INSERT INTO users (id,email,name,password,role,active,base_points,created) SELECT ?,?,?,?,'admin',1,0,? WHERE (SELECT value FROM settings WHERE key='bootstrap_done')=?").bind(id,c.email,c.name,pwd,now(),id)]);
-  if(!r[1].meta.changes)fail("Administratorul este deja configurat.",409);
-  return json({ok:true},200,{"Set-Cookie":await session(id,request)});
- }
- if(action==="register"){
-  if(!await setupDone())fail("Administratorul trebuie să configureze aplicația înainte de înscriere.",409);
-  const c=credentials.parse(body),id=uuid();if(await db().prepare("SELECT id FROM users WHERE email=?").bind(c.email).first())fail("Există deja un cont cu această adresă de email.",409);
-  await db().prepare("INSERT INTO users (id,email,name,password,role,active,base_points,created) VALUES (?,?,?,?,'doctor',0,0,?)").bind(id,c.email,c.name,await hashPassword(c.password),now()).run();
-  const admins=(await db().prepare("SELECT id FROM users WHERE role='admin' AND active=1").all()).results;
-  if(admins.length)await db().batch(admins.map(a=>notification(String(a.id),`${c.name} a solicitat acces în echipă.`)));
-  return json({ok:true},200,{"Set-Cookie":await session(id,request)});
+ if(action==="setup"||action==="register"){
+  const c=credentials.extend({token:z.string().optional()}).parse(body);
+  const target=await db().prepare("SELECT * FROM users WHERE id=? AND listed=1 AND active=1").bind(c.doctor_id).first<User>();
+  if(!target)fail("Selectează un medic din lista introdusă de administrator.",400);
+  const owner=isAdmin(target);
+  if(action==="setup"){
+   if(!owner||c.email!==ADMIN_EMAIL)fail("Administratorul este Pecie Mihai, cu adresa pmihaidorin@gmail.com.",403);
+   if(!c.token||!await validSetupToken(c.token))fail("Linkul de configurare nu este valid.",403);
+   if(await setupDone())fail("Administratorul este deja configurat.",409);
+  }else{
+   if(owner||c.email===ADMIN_EMAIL)fail("Contul administratorului se configurează numai prin linkul privat.",403);
+   if(!await setupDone())fail("Administratorul trebuie să configureze aplicația înainte de activarea conturilor.",409);
+  }
+  if(target.password)fail("Acest medic are deja un cont. Folosește autentificarea sau recuperarea parolei.",409);
+  if(c.email.endsWith("@garda.invalid"))fail("Introdu o adresă de email reală pentru recuperarea parolei.");
+  if(await db().prepare("SELECT id FROM users WHERE email=? AND id<>?").bind(c.email,target.id).first())fail("Există deja un cont cu această adresă de email.",409);
+  const pwd=await hashPassword(c.password);
+  const result=await db().batch([
+   db().prepare("UPDATE users SET email=?,password=? WHERE id=? AND password='' AND listed=1 AND active=1").bind(c.email,pwd,target.id),
+   ...(owner?[
+    db().prepare("INSERT INTO settings(key,value) SELECT 'bootstrap_done',? WHERE EXISTS(SELECT 1 FROM users WHERE id=? AND password=?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").bind(target.id,target.id,pwd),
+    db().prepare("DELETE FROM settings WHERE key='owner_setup_token' AND EXISTS(SELECT 1 FROM users WHERE id=? AND password=?)").bind(target.id,pwd)
+   ]:[])
+  ]);
+  if(!result[0].meta.changes)fail("Acest medic a fost deja activat. Autentifică-te.",409);
+  await audit(target.id,owner?"Administrator configurat":"Cont activat pentru "+target.name).run();
+  return json({ok:true},200,{"Set-Cookie":await session(target.id,request)});
  }
  if(action==="login"){
-  const c=z.object({email:emailSchema,password:z.string().max(128)}).parse(body);await rateLimit(request,`login:${await digest(c.email)}`,10);
-  const u=await db().prepare("SELECT * FROM users WHERE email=?").bind(c.email).first<User>();
+  const c=z.object({doctor_id:z.string().min(1),password:z.string().max(128)}).parse(body);
+  await rateLimit(request,`login:${await digest(c.doctor_id)}`,10);
+  const u=await db().prepare("SELECT * FROM users WHERE id=? AND listed=1 AND active=1 AND password<>''").bind(c.doctor_id).first<User>();
   const valid=await passwordOK(c.password,u?.password??"pbkdf2$100000$nonexistent-user-salt$0000000000000000000000000000000000000000000000000000000000000000");
-  if(!u||!valid)fail("Email sau parolă incorectă.",401);return json({ok:true},200,{"Set-Cookie":await session(u.id,request)});
+  if(!u||!valid)fail("Medicul selectat sau parola este incorectă.",401);
+  return json({ok:true},200,{"Set-Cookie":await session(u.id,request)});
  }
  if(action==="forgot"){
   const c=z.object({email:emailSchema}).parse(body);await rateLimit(request,`forgot:${await digest(c.email)}`,5);
   if(!runtime("RESEND_API_KEY")||!runtime("MAIL_FROM"))fail("Recuperarea prin email nu este încă activată. Solicită administratorului resetarea parolei.",503);
-  const u=await db().prepare("SELECT * FROM users WHERE email=?").bind(c.email).first<User>();
+  const u=await db().prepare("SELECT * FROM users WHERE email=? AND listed=1 AND active=1 AND password<>''").bind(c.email).first<User>();
   if(u){const token=randomToken();const hashed=await digest(token);await db().batch([db().prepare("DELETE FROM resets WHERE user_id=?").bind(u.id),db().prepare("INSERT INTO resets (token,user_id,expires) VALUES (?,?,?)").bind(hashed,u.id,Date.now()+1800000)]);
    const link=`${runtime("SITE_ORIGIN")||url.origin}/?reset=${encodeURIComponent(token)}`;
    const sent=await fetch("https://api.resend.com/emails",{method:"POST",headers:{"Authorization":`Bearer ${runtime("RESEND_API_KEY")}`,"Content-Type":"application/json"},body:JSON.stringify({from:runtime("MAIL_FROM"),to:[u.email],subject:"Garda · Resetarea parolei",text:`Ai solicitat resetarea parolei. Deschide linkul în următoarele 30 de minute:\n${link}\nDacă nu ai solicitat resetarea, ignoră acest email.`})});
@@ -121,12 +135,26 @@ export async function POST(request:Request){try{
   if(r[0].meta.changes!==1||r[1].meta.changes!==2){await db().prepare("UPDATE swaps SET status='expired' WHERE id=? AND status='pending'").bind(s.id).run();fail("Programul s-a schimbat între timp. Trimite o cerere nouă.",409);}
   await db().batch([notification(s.requester,`${user.name} a acceptat schimbul ${dateLabel(s.from_date)} ↔ ${dateLabel(s.to_date)}.`),notification(s.recipient,"Schimbul a fost acceptat. Programul a fost actualizat."),audit(user.id,`Schimb acceptat: ${s.from_date} ↔ ${s.to_date}`)]);return json({ok:true});
  }
- if(user.role!=="admin")fail("Această acțiune este disponibilă doar administratorului.",403);
+ if(!isAdmin(user))fail("Această acțiune este disponibilă doar administratorului.",403);
+ if(action==="doctor-add"){
+  const c=z.object({name:z.string().trim().min(2).max(80)}).parse(body);
+  const names=(await db().prepare("SELECT name FROM users WHERE listed=1").all()).results;
+  if(names.some(u=>normalizeDoctorName(String(u.name))===normalizeDoctorName(c.name)))fail("Acest medic este deja în listă.",409);
+  const id=uuid();
+  await db().batch([db().prepare("INSERT INTO users(id,name,email,password,role,active,base_points,created,listed) VALUES(?,?,?,'','doctor',1,0,?,1)").bind(id,c.name,unclaimedEmail(id),now()),audit(user.id,`Medic adăugat în echipă: ${c.name}`)]);
+  return json({ok:true,id});
+ }
+ if(action==="reset-accounts"){
+  z.object({confirmation:z.literal("RESETARE")}).parse(body);
+  await audit(user.id,"Toate conturile de acces resetate; programările și punctajele au fost păstrate").run();
+  const token=await resetAccounts();
+  return json({ok:true,link:`${url.origin}/?setup=${encodeURIComponent(token)}`},200,{"Set-Cookie":cookie("",request,true)});
+ }
  if(action==="user-update"){
-  const c=z.object({id:z.string(),active:z.number().int().min(0).max(1),base_points:z.number().int().min(0).max(100000)}).parse(body);const target=await db().prepare("SELECT * FROM users WHERE id=?").bind(c.id).first<User>();if(!target)fail("Contul nu există.");if(target.role==="admin"&&!c.active)fail("Administratorul trebuie să rămână activ.");await db().batch([db().prepare("UPDATE users SET active=?,base_points=? WHERE id=?").bind(c.active,c.base_points,c.id),notification(c.id,c.active?"Contul tău a fost aprobat. Poți selecta gărzile.":"Accesul tău la echipă a fost suspendat."),audit(user.id,`Cont actualizat: ${target.name}, puncte inițiale ${c.base_points}, activ ${c.active}`)]);return json({ok:true});
+  const c=z.object({id:z.string(),active:z.number().int().min(0).max(1),base_points:z.number().int().min(0).max(100000)}).parse(body);const target=await db().prepare("SELECT * FROM users WHERE id=?").bind(c.id).first<User>();if(!target||!target.listed)fail("Medicul nu este în lista echipei.");if(isAdmin(target)&&!c.active)fail("Administratorul trebuie să rămână activ.");await db().batch([db().prepare("UPDATE users SET active=?,base_points=? WHERE id=?").bind(c.active,c.base_points,c.id),notification(c.id,c.active?"Accesul tău la echipă este activ. Poți selecta gărzile.":"Accesul tău la echipă a fost suspendat."),audit(user.id,`Cont actualizat: ${target.name}, puncte inițiale ${c.base_points}, activ ${c.active}`)]);return json({ok:true});
  }
  if(action==="admin-reset"){
-  const c=z.object({id:z.string()}).parse(body);const target=await db().prepare("SELECT * FROM users WHERE id=?").bind(c.id).first<User>();if(!target)fail("Contul nu există.");const token=randomToken();await db().batch([db().prepare("DELETE FROM resets WHERE user_id=?").bind(c.id),db().prepare("INSERT INTO resets (token,user_id,expires) VALUES (?,?,?)").bind(await digest(token),c.id,Date.now()+1800000),audit(user.id,`Link de resetare generat pentru ${target.name}`)]);return json({ok:true,link:`${runtime("SITE_ORIGIN")||url.origin}/?reset=${encodeURIComponent(token)}`});
+  const c=z.object({id:z.string()}).parse(body);const target=await db().prepare("SELECT * FROM users WHERE id=?").bind(c.id).first<User>();if(!target||!target.listed||!target.password)fail("Medicul trebuie să își activeze mai întâi contul.");const token=randomToken();await db().batch([db().prepare("DELETE FROM resets WHERE user_id=?").bind(c.id),db().prepare("INSERT INTO resets (token,user_id,expires) VALUES (?,?,?)").bind(await digest(token),c.id,Date.now()+1800000),audit(user.id,`Link de resetare generat pentru ${target.name}`)]);return json({ok:true,link:`${runtime("SITE_ORIGIN")||url.origin}/?reset=${encodeURIComponent(token)}`});
  }
  if(action==="holiday"){
   const c=z.object({date:dateSchema,label:z.string().trim().min(2).max(100),enabled:z.number().int().min(0).max(1)}).parse(body);

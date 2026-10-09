@@ -1,4 +1,5 @@
 import { db } from "@/lib/server";
+import { initializeTeam } from "./accounts";
 
 const statements: string[] = [
   "CREATE TABLE IF NOT EXISTS `audit` (\n\t`id` text PRIMARY KEY NOT NULL,\n\t`user_id` text NOT NULL,\n\t`action` text NOT NULL,\n\t`created` text NOT NULL\n);",
@@ -27,7 +28,7 @@ let ready: Promise<void> | undefined;
 
 export function ensureSchema(): Promise<void> {
   ready ??= db().batch(statements.map(sql => db().prepare(sql)))
-    .then(() => undefined)
+    .then(() => initializeTeam())
     .catch(error => { ready = undefined; throw error; });
   return ready;
 }
