@@ -21,7 +21,12 @@ const statements: string[] = [
   "CREATE INDEX IF NOT EXISTS `swaps_requester` ON `swaps` (`requester`);",
   "CREATE INDEX IF NOT EXISTS `swaps_recipient` ON `swaps` (`recipient`);",
   "CREATE TABLE IF NOT EXISTS `users` (\n\t`id` text PRIMARY KEY NOT NULL,\n\t`email` text NOT NULL,\n\t`name` text NOT NULL,\n\t`password` text NOT NULL,\n\t`role` text DEFAULT 'doctor' NOT NULL,\n\t`active` integer DEFAULT 0 NOT NULL,\n\t`base_points` integer DEFAULT 0 NOT NULL,\n\t`created` text NOT NULL\n);",
-  "CREATE UNIQUE INDEX IF NOT EXISTS `users_email_unique` ON `users` (`email`);"
+  "CREATE UNIQUE INDEX IF NOT EXISTS `users_email_unique` ON `users` (`email`);",
+  "CREATE TABLE IF NOT EXISTS push_subscriptions (id TEXT PRIMARY KEY NOT NULL,user_id TEXT NOT NULL,endpoint TEXT NOT NULL,p256dh TEXT NOT NULL,auth TEXT NOT NULL,created TEXT NOT NULL,FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE)",
+  "CREATE INDEX IF NOT EXISTS push_subscriptions_user ON push_subscriptions(user_id)",
+  "CREATE TABLE IF NOT EXISTS push_deliveries (id TEXT PRIMARY KEY NOT NULL,notification_id TEXT NOT NULL,subscription_id TEXT NOT NULL,created TEXT NOT NULL,done INTEGER NOT NULL DEFAULT 0,attempts INTEGER NOT NULL DEFAULT 0,retry_at INTEGER NOT NULL DEFAULT 0,claim TEXT,FOREIGN KEY(notification_id) REFERENCES notifications(id) ON DELETE CASCADE,FOREIGN KEY(subscription_id) REFERENCES push_subscriptions(id) ON DELETE CASCADE)",
+  "CREATE INDEX IF NOT EXISTS push_deliveries_pending ON push_deliveries(done,retry_at)",
+  "CREATE TRIGGER IF NOT EXISTS notifications_push_insert AFTER INSERT ON notifications BEGIN INSERT INTO push_deliveries(id,notification_id,subscription_id,created) SELECT NEW.id||':'||s.id,NEW.id,s.id,NEW.created FROM push_subscriptions s JOIN users u ON u.id=s.user_id WHERE s.user_id=NEW.user_id AND u.active=1 AND u.listed=1 AND u.password<>''; END"
 ];
 
 let ready: Promise<void> | undefined;

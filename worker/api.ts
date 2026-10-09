@@ -1,5 +1,6 @@
 import { z } from "zod";
-import { db,runtime,uuid,now,digest,hashPassword,passwordOK,currentUser,session,cookie,fail,AppError,rateLimit,notification,audit,safeUser,randomToken,isAdmin,type User } from "@/lib/server";
+import { db,runtime,uuid,now,digest,hashPassword,passwordOK,currentUser,session,cookie,fail,AppError,rateLimit,notification,broadcastNotification,audit,safeUser,randomToken,isAdmin,type User } from "@/lib/server";
+import { pushAction,removePushDevice } from "./push";
 import { ADMIN_EMAIL,normalizeDoctorName,unclaimedEmail } from "@/lib/team";
 import { setupComplete as setupDone,publicDoctors,validSetupToken,resetAccounts } from "./accounts";
 import { allocate,type Participant } from "@/lib/scheduler";
@@ -25,10 +26,12 @@ async function mutation(m:Month,status:string,statements:(op:string)=>D1Prepared
 export async function GET(request:Request){try{
  const user=await currentUser(request),setupComplete=await setupDone(),emailReady=!!(runtime("RESEND_API_KEY")&&runtime("MAIL_FROM"));
  if(new URL(request.url).searchParams.get("view")==="preview"){
-  if(!user)fail("Autentifică-te pentru a vedea previzualizarea.",401);
-  if(!user.active||!isAdmin(user))fail("Previzualizarea este disponibilă administratorului.",403);
+  if(!user)fail("Autentifică-te pentru a vedea programul.",401);
+  if(!user.active)fail("Contul nu are acces la program.",403);
   const month=monthSchema.parse(new URL(request.url).searchParams.get("month"));
-  return json(await getMonthPreview(month));
+  const preview=await getMonthPreview(month);
+  if(!isAdmin(user))return json({...preview,shifts:preview.shifts.map(s=>({...s,reason:"Repartizare"})),doctors:[],report:{uncovered:preview.report.uncovered,conflicts:[],deficits:[]},stats:{...preview.stats,requested:0,submitted:0,activeDoctors:0,preferredHonored:0,missingSubmissions:[]}});
+  return json(preview);
  }
  if(!user)return json({me:null,setupComplete,emailReady,doctors:await publicDoctors()});
  if(!user.active)return json({me:safeUser(user),setupComplete,emailReady,pending:true});
@@ -106,16 +109,17 @@ export async function POST(request:Request){try{
   const r=await db().batch([db().prepare("UPDATE users SET password=? WHERE id=? AND EXISTS(SELECT 1 FROM resets WHERE token=? AND expires>?)").bind(await hashPassword(c.password),reset.user_id,token,Date.now()),db().prepare("DELETE FROM sessions WHERE user_id=?").bind(reset.user_id),db().prepare("DELETE FROM resets WHERE user_id=?").bind(reset.user_id)]);if(!r[0].meta.changes)fail("Linkul de resetare nu mai este valid.");return json({ok:true});
  }
  const user=await currentUser(request);if(!user)fail("Autentifică-te pentru a continua.",401);
- if(action==="logout"){const match=request.headers.get("cookie")?.match(/(?:^|;\s*)garda_session=([^;]+)/);if(match)await db().prepare("DELETE FROM sessions WHERE token=?").bind(await digest(match[1])).run();return json({ok:true},200,{"Set-Cookie":cookie("",request,true)});}
+ if(action==="logout"){if(typeof body.endpoint==="string"&&body.endpoint.length<=2048)await removePushDevice(user.id,body.endpoint);const match=request.headers.get("cookie")?.match(/(?:^|;\s*)garda_session=([^;]+)/);if(match)await db().prepare("DELETE FROM sessions WHERE token=?").bind(await digest(match[1])).run();return json({ok:true},200,{"Set-Cookie":cookie("",request,true)});}
  if(action==="password"){
   const c=z.object({current:z.string().max(128),password:passwordSchema}).parse(body);if(!await passwordOK(c.current,user.password))fail("Parola actuală este incorectă.");await db().batch([db().prepare("UPDATE users SET password=? WHERE id=?").bind(await hashPassword(c.password),user.id),db().prepare("DELETE FROM sessions WHERE user_id=?").bind(user.id)]);return json({ok:true},200,{"Set-Cookie":await session(user.id,request)});
  }
  if(!user.active)fail("Contul așteaptă aprobarea administratorului.",403);
+ if(["push-config","push-subscribe","push-unsubscribe","push-status","push-test"].includes(action))return json(await pushAction(action,body,user));
  if(action==="read-notifications"){await db().prepare("UPDATE notifications SET read=1 WHERE user_id=?").bind(user.id).run();return json({ok:true});}
  if(action==="submit"){
   const c=z.object({month:monthSchema,preferred:z.array(z.number().int()).max(31),available:z.array(z.number().int()).max(31)}).parse(body);try{validateSelection(c.month,c.preferred,c.available);}catch(error){fail((error as Error).message);}
   const m=await getMonth(c.month);if(m.status!=="open"||m.deadline&&m.deadline<=now())fail("Perioada de înscriere este închisă.",409);
-  const op=uuid();const r=await db().batch([db().prepare("UPDATE months SET version=version+1,mutation=? WHERE id=? AND status='open' AND (deadline IS NULL OR deadline>?)").bind(op,c.month,now()),db().prepare("INSERT INTO submissions (id,month,user_id,preferred,available,updated) SELECT ?,?,?,?,?,? WHERE EXISTS(SELECT 1 FROM months WHERE id=? AND mutation=?) ON CONFLICT(id) DO UPDATE SET preferred=excluded.preferred,available=excluded.available,updated=excluded.updated").bind(`${c.month}:${user.id}`,c.month,user.id,JSON.stringify(c.preferred),JSON.stringify(c.available),now(),c.month,op),db().prepare("INSERT INTO audit (id,user_id,action,created) SELECT ?,?,?,? WHERE EXISTS(SELECT 1 FROM months WHERE id=? AND mutation=?)").bind(uuid(),user.id,`Preferințe salvate: ${c.month}`,now(),c.month,op)]);if(!r[0].meta.changes)fail("Înscrierile s-au închis între timp.",409);return json({ok:true});
+  const op=uuid();const r=await db().batch([db().prepare("UPDATE months SET version=version+1,mutation=? WHERE id=? AND status='open' AND (deadline IS NULL OR deadline>?)").bind(op,c.month,now()),db().prepare("INSERT INTO submissions (id,month,user_id,preferred,available,updated) SELECT ?,?,?,?,?,? WHERE EXISTS(SELECT 1 FROM months WHERE id=? AND mutation=?) ON CONFLICT(id) DO UPDATE SET preferred=excluded.preferred,available=excluded.available,updated=excluded.updated").bind(`${c.month}:${user.id}`,c.month,user.id,JSON.stringify(c.preferred),JSON.stringify(c.available),now(),c.month,op),db().prepare("INSERT INTO audit (id,user_id,action,created) SELECT ?,?,?,? WHERE EXISTS(SELECT 1 FROM months WHERE id=? AND mutation=?)").bind(uuid(),user.id,`Preferințe salvate: ${c.month}`,now(),c.month,op)]);if(!r[0].meta.changes)fail("Înscrierile s-au închis între timp.",409);await notification(user.id,`Înscrierea ta pentru ${monthTitle(c.month)} a fost salvată: ${c.preferred.length} gărzi solicitate.`).run();return json({ok:true});
  }
  if(action==="swap-request"){
   const c=z.object({from:dateSchema,to:dateSchema}).parse(body);if(c.from===c.to||c.from<=todayRO()||c.to<=todayRO())fail("Schimburile sunt permise doar pentru două zile viitoare distincte.");
@@ -165,11 +169,11 @@ export async function POST(request:Request){try{
   const m=await db().prepare("SELECT * FROM months WHERE id=?").bind(c.month).first<Month>();if(m&&["published","completed"].includes(m.status))fail("Un program definitiv nu poate fi redeschis. Folosește cererile de schimb.");
   if(m)await mutation(m,"open",op=>[db().prepare("UPDATE months SET deadline=?,report='{}' WHERE id=? AND mutation=?").bind(c.deadline,c.month,op),db().prepare("DELETE FROM shifts WHERE month=? AND EXISTS(SELECT 1 FROM months WHERE id=? AND mutation=?)").bind(c.month,c.month,op)],user,`Înscrieri deschise: ${c.month}`);
   else await db().batch([db().prepare("INSERT INTO months (id,status,deadline,version,report) VALUES (?,'open',?,0,'{}')").bind(c.month,c.deadline),audit(user.id,`Înscrieri deschise: ${c.month}`)]);
-  const doctors=(await db().prepare("SELECT id FROM users WHERE active=1").all()).results;if(doctors.length)await db().batch(doctors.map(d=>notification(String(d.id),`S-au deschis înscrierile pentru ${monthTitle(c.month)}.`)));return json({ok:true});
+  await broadcastNotification(`S-au deschis înscrierile pentru ${monthTitle(c.month)}.`).run();return json({ok:true});
  }
  const c=z.object({month:monthSchema,version:z.number().int()}).parse(body);const m=await getMonth(c.month);guard(m,c.version);
  if(action==="month-close"){
-  if(m.status!=="open")fail("Luna nu este deschisă pentru înscrieri.");await mutation(m,"closed",()=>[],user,`Înscrieri închise: ${c.month}`);return json({ok:true});
+  if(m.status!=="open")fail("Luna nu este deschisă pentru înscrieri.");await mutation(m,"closed",op=>[db().prepare("INSERT INTO notifications(id,user_id,message,read,created) SELECT lower(hex(randomblob(16))),id,?,0,? FROM users WHERE active=1 AND listed=1 AND password<>'' AND EXISTS(SELECT 1 FROM months WHERE id=? AND mutation=?)").bind(`S-au închis înscrierile pentru ${monthTitle(c.month)}.`,now(),m.id,op)],user,`Înscrieri închise: ${c.month}`);return json({ok:true});
  }
  if(action==="generate"){
   if(!["closed","draft"].includes(m.status))fail("Închide înscrierile înainte de generarea programului.");
@@ -188,7 +192,7 @@ export async function POST(request:Request){try{
  if(action==="publish"){
   if(m.status!=="draft")fail("Generează mai întâi programul provizoriu.");const count=await db().prepare("SELECT COUNT(*) AS n FROM shifts WHERE month=?").bind(c.month).first<{n:number}>();if(count?.n!==monthDays(c.month))fail("Programul are zile neacoperite. Completează-le înainte de definitivare.");
   const inactive=await db().prepare("SELECT s.date FROM shifts s JOIN users u ON u.id=s.user_id WHERE s.month=? AND u.active=0 LIMIT 1").bind(c.month).first();if(inactive)fail("Programul conține un medic cu acces suspendat. Regenerează-l.");
-  await mutation(m,"published",()=>[],user,`Program definitivat: ${c.month}`);const doctors=(await db().prepare("SELECT id FROM users WHERE active=1").all()).results;if(doctors.length)await db().batch(doctors.map(d=>notification(String(d.id),`Programul pentru ${monthTitle(c.month)} a fost definitivat.`)));return json({ok:true});
+  await mutation(m,"published",()=>[],user,`Program definitivat: ${c.month}`);await broadcastNotification(`Programul pentru ${monthTitle(c.month)} a fost definitivat.`).run();return json({ok:true});
  }
  if(action==="complete"){
   if(m.status!=="published")fail("Punctele se acordă doar pentru un program definitiv.");if(dateKey(c.month,monthDays(c.month))>=todayRO())fail("Poți confirma gărzile efectuate după încheierea lunii.");
