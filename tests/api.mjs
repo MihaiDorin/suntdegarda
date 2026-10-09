@@ -1,0 +1,59 @@
+// These tests use an isolated local D1 and synthetic accounts only.
+// No production database or Cloudflare credentials are used.
+for (const key of ['HTTP_PROXY','HTTPS_PROXY','ALL_PROXY','http_proxy','https_proxy','all_proxy']) delete process.env[key];
+import {createRequire} from 'node:module';
+import fs from 'node:fs';import path from 'node:path';import assert from 'node:assert/strict';
+const req=createRequire(import.meta.resolve('wrangler'));const {Miniflare}=await import(req.resolve('miniflare'));
+function walk(dir){return fs.readdirSync(dir,{withFileTypes:true}).flatMap(x=>x.isDirectory()?walk(path.join(dir,x.name)):[path.join(dir,x.name)]);}
+// Verification uses synthetic secrets and an isolated D1, never production data.
+const bindings={AUTH_SECRET:'test-only-garda-auth-secret-not-for-production',BOOTSTRAP_TOKEN:'test-only-garda-bootstrap-token'};
+bindings.SITE_ORIGIN='https://garda.test';
+const modules=walk('dist/suntdegarda').filter(x=>x.endsWith('.js')).sort((a,b)=>a==='dist/suntdegarda/index.js'?-1:b==='dist/suntdegarda/index.js'?1:a.localeCompare(b)).map(x=>({type:'ESModule',path:path.resolve(x)}));
+const mf=new Miniflare({modules,modulesRoot:path.resolve('dist/suntdegarda'),compatibilityDate:'2026-05-15',compatibilityFlags:['nodejs_compat'],host:'127.0.0.1',cf:false,d1Databases:{DB:'garda-qa'},bindings,assets:{directory:path.resolve('dist/client'),binding:'ASSETS',routerConfig:{has_user_worker:true,static_routing:{user_worker:['/api/*']}},assetConfig:{not_found_handling:'single-page-application'}}});
+const yearNumber=Number(new Intl.DateTimeFormat('en',{timeZone:'Europe/Bucharest',year:'numeric'}).format(new Date()))+1;
+const pastYear=yearNumber-2;
+const cookies={};let checks=0;
+async function call(actor,action,values={},status=200){const r=await mf.dispatchFetch('https://garda.test/api/garda',{method:'POST',headers:{'content-type':'application/json','X-Garda-Request':'1',Origin:'https://garda.test',...(cookies[actor]?{Cookie:cookies[actor]}:{})},body:JSON.stringify({action,...values})});const b=await r.json();assert.equal(r.status,status,`${action}: ${JSON.stringify(b)}`);const cookie=r.headers.get('set-cookie');if(cookie)cookies[actor]=cookie.split(';')[0];checks++;return b;}
+async function state(actor,year=yearNumber){const r=await mf.dispatchFetch('https://garda.test/api/garda?year='+year,{headers:cookies[actor]?{Cookie:cookies[actor]}:{}});const b=await r.json();assert.equal(r.status,200,JSON.stringify(b));checks++;return b;}
+async function preview(actor,month,status=200){const r=await mf.dispatchFetch('https://garda.test/api/garda?view=preview&month='+month,{headers:cookies[actor]?{Cookie:cookies[actor]}:{}});const b=await r.json();assert.equal(r.status,status,JSON.stringify(b));checks++;return b;}
+try{
+ const database=await mf.getD1Database('DB');
+ const firstState=await state('anon');assert.equal(firstState.me,null);assert.equal(firstState.setupComplete,false);assert.equal((await database.prepare("SELECT COUNT(*) AS n FROM sqlite_master WHERE type='table' AND name IN ('users','months','settings','holidays','submissions','shifts','swaps','notifications','audit','sessions','resets','limits')").first()).n,12);await preview('anon',`${yearNumber}-11`,401);
+ const badOrigin=await mf.dispatchFetch('https://garda.test/api/garda',{method:'POST',headers:{'content-type':'application/json','X-Garda-Request':'1',Origin:'https://attacker.test'},body:JSON.stringify({action:'login',email:'qa@test.example',password:'wrong'})});assert.equal(badOrigin.status,403);checks++;
+ await call('admin','setup',{token:bindings.BOOTSTRAP_TOKEN,email:'admin@qa.example',name:'Administrator QA',password:'Verification123!'});
+ await call('anon','setup',{token:bindings.BOOTSTRAP_TOKEN,email:'intruder@qa.example',name:'Intruder',password:'Verification123!'},409);
+ const admin=(await state('admin')).me;assert.equal(admin.role,'admin');
+ const ids={admin:admin.id};
+ for(const actor of ['a','b','c','d']){await call(actor,'register',{email:`${actor}@qa.example`,name:`Doctor ${actor.toUpperCase()}`,password:'Verification123!'});const pending=await state(actor);assert.equal(pending.pending,true);ids[actor]=pending.me.id;await call(actor,'month-open',{month:`${yearNumber}-11`,deadline:null},403);if(actor==='a')await preview(actor,`${yearNumber}-11`,403);await call('admin','user-update',{id:ids[actor],active:1,base_points:actor==='a'?40:actor==='b'?30:0});}
+ await call('a','user-update',{id:admin.id,active:0,base_points:0},403);
+ const unopened=await preview('admin',`${yearNumber}-10`);assert.equal(unopened.source,'empty');assert.equal(unopened.stats.covered,0);assert.equal(unopened.report.uncovered.length,31);await preview('admin',`${yearNumber}-99`,400);await preview('a',`${yearNumber}-11`,403);
+ await call('admin','month-open',{month:`${yearNumber}-11`,deadline:null});const openEmpty=await preview('admin',`${yearNumber}-11`);assert.equal(openEmpty.source,'simulation');assert.equal(openEmpty.stats.covered,0);
+ await call('a','submit',{month:`${yearNumber}-11`,preferred:[1,2],available:[2,3]},400);
+ const actors=['admin','a','b','c','d'];
+ for(let i=0;i<actors.length;i++){const preferred=Array.from({length:6},(_,n)=>i*6+n+1);const available=Array.from({length:30},(_,n)=>n+1).filter(d=>!preferred.includes(d));await call(actors[i],'submit',{month:`${yearNumber}-11`,preferred,available});if(i===0){const before=await state('admin');const partial=await preview('admin',`${yearNumber}-11`);assert.equal(partial.stats.covered,6);assert.equal(partial.report.uncovered.length,24);assert.equal(partial.stats.missingSubmissions.length,4);const repeated=await preview('admin',`${yearNumber}-11`);assert.deepEqual(repeated.shifts,partial.shifts);const after=await state('admin');assert.deepEqual(after.months,before.months);assert.deepEqual(after.shifts,before.shifts);assert.deepEqual(after.events,before.events);assert.deepEqual(after.users,before.users);}}
+ const visible=await state('a');assert.equal(visible.submissions.length,1);assert(!visible.users.some(u=>u.email));
+ const simulated=await preview('admin',`${yearNumber}-11`);assert.equal(simulated.stats.covered,30);assert.equal(simulated.stats.preferredHonored,30);assert.equal(simulated.report.uncovered.length,0);assert.equal(simulated.doctors.find(u=>u.id===ids.a).currentPoints,40);assert(simulated.doctors.find(u=>u.id===ids.a).projectedPoints>40);
+ let m=(await state('admin')).months.find(m=>m.id===`${yearNumber}-11`);await call('admin','month-close',{month:m.id,version:m.version});
+ await call('a','submit',{month:`${yearNumber}-11`,preferred:[1],available:[2]},409);
+ m=(await state('admin')).months.find(m=>m.id===`${yearNumber}-11`);await call('admin','generate',{month:m.id,version:m.version});
+ const draft=await state('admin');assert.equal(draft.shifts.length,30);assert.equal((await state('a')).shifts.length,0);const savedPreview=await preview('admin',`${yearNumber}-11`);assert.equal(savedPreview.source,'saved');assert.deepEqual(savedPreview.shifts,simulated.shifts);await database.prepare(`UPDATE shifts SET reason='Atribuire manuală QA' WHERE date='${yearNumber}-11-01'`).run();const manualPreview=await preview('admin',`${yearNumber}-11`);assert.equal(manualPreview.shifts.find(s=>s.date===`${yearNumber}-11-01`).reason,'Atribuire manuală QA');
+ await call('admin','publish',{month:`${yearNumber}-11`,version:m.version},409);
+ m=draft.months.find(m=>m.id===`${yearNumber}-11`);await call('admin','publish',{month:m.id,version:m.version});
+ const published=await state('a');assert.equal(published.shifts.length,30);const from=published.shifts.find(s=>s.user_id===ids.a).date,to=published.shifts.find(s=>s.user_id===ids.b).date;
+ await call('a','swap-request',{from,to});let swaps=(await state('b')).swaps;const swap=swaps[0];assert.equal(swap.status,'pending');assert((await state('b')).notifications.some(n=>n.message.includes('propone')||n.message.includes('propune')));
+ await call('c','swap-answer',{id:swap.id,answer:'accept'},403);
+ await call('b','swap-answer',{id:swap.id,answer:'accept'});const after=await state('b');assert.equal(after.shifts.find(s=>s.date===from).user_id,ids.b);assert.equal(after.shifts.find(s=>s.date===to).user_id,ids.a);const finalPreview=await preview('admin',`${yearNumber}-11`);assert.equal(finalPreview.source,'final');assert.deepEqual(finalPreview.shifts,after.shifts);assert.equal(finalPreview.shifts.find(s=>s.date===from).user_id,ids.b);
+ await call('b','swap-answer',{id:swap.id,answer:'accept'},409);assert.equal((await state('a')).users.find(u=>u.id===ids.a).points,40);
+ m=after.months.find(m=>m.id===`${yearNumber}-11`);await call('admin','complete',{month:m.id,version:m.version},400);
+ await call('admin','month-open',{month:`${yearNumber}-12`,deadline:null});await call('admin','holiday',{date:`${yearNumber}-12-24`,label:'Ajun QA',enabled:1});await call('a','submit',{month:`${yearNumber}-12`,preferred:[25],available:[26]});m=(await state('admin')).months.find(m=>m.id===`${yearNumber}-12`);await call('admin','month-close',{month:m.id,version:m.version});m=(await state('admin')).months.find(m=>m.id===`${yearNumber}-12`);await call('admin','generate',{month:m.id,version:m.version});m=(await state('admin')).months.find(m=>m.id===`${yearNumber}-12`);await call('admin','publish',{month:m.id,version:m.version},400);
+ // Seed a historical finalized month only in this isolated test database.
+ await database.batch([database.prepare(`INSERT INTO months(id,status,version,report) VALUES('${pastYear}-09','published',0,'{}')`),database.prepare(`INSERT INTO shifts(date,month,user_id,points,reason,completed) VALUES('${pastYear}-09-01','${pastYear}-09',?,3,'QA',0)`).bind(ids.a)]);
+ await call('admin','complete',{month:`${pastYear}-09`,version:0});assert.equal((await state('a')).users.find(u=>u.id===ids.a).points,43);const completedPreview=await preview('admin',`${pastYear}-09`);assert.equal(completedPreview.source,'final');assert.equal(completedPreview.doctors.find(u=>u.id===ids.a).monthPoints,3);assert.equal(completedPreview.doctors.find(u=>u.id===ids.a).projectedPoints,43);await call('admin','complete',{month:`${pastYear}-09`,version:1},400);assert.equal((await state('a')).users.find(u=>u.id===ids.a).points,43);
+ const reset=await call('admin','admin-reset',{id:ids.a});const token=new URL(reset.link).searchParams.get('reset');await call('anon','reset',{token,password:'ChangedPassword123!'});assert.equal((await state('a')).me,null);await call('a','login',{email:'a@qa.example',password:'ChangedPassword123!'});await call('anon','reset',{token,password:'ReplayPassword123!'},400);
+ await call('a','password',{current:'WrongPassword',password:'NextPassword123!'},400);await call('a','password',{current:'ChangedPassword123!',password:'NextPassword123!'});await call('a','logout');assert.equal((await state('a')).me,null);
+ await call('anon','forgot',{email:'a@qa.example'},503);
+ await call('admin','month-open',{month:`${yearNumber+1}-01`,deadline:null});await call('a','login',{email:'a@qa.example',password:'NextPassword123!'});assert.equal((await state('a')).suggestedMonth,`${yearNumber+1}-01`);checks++;const futurePreview=await preview('admin',`${yearNumber+1}-01`);assert.equal(futurePreview.stats.days,31);assert.equal(futurePreview.holidays[`${yearNumber+1}-01-01`],'Anul Nou');
+ const html=await mf.dispatchFetch('https://garda.test/');assert.equal(html.status,200);const markup=await html.text();assert(markup.includes('Garda'));checks++;
+ console.log(`Passed ${checks} API checks: admin setup, registration, approval, roles, CSRF, enrollment, private drafts, generation, publishing, swaps, points once only, reset single use, session revocation HTML rendering and read-only monthly previews including manual changes, swaps and confirmed points.`);
+ 
+}finally{await mf.dispose();}
