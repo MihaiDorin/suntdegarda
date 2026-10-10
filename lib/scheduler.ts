@@ -15,11 +15,9 @@ export function allocate(month:string,input:Participant[],holidays:Record<string
    picks.set(day,{id,reason:`Preferința ${rank+1}`,locked:true});counts.set(id,(counts.get(id)??0)+1);rotate(id);
   }
  }
- const candidates=(id:string)=>{const p=byId.get(id)!;return [...p.preferred,...p.available].filter(d=>!picks.get(d)?.locked).sort((a,b)=>{
-  const scarcity=(day:number)=>people.filter(q=>[...q.preferred,...q.available].includes(day)).length;
-  return scarcity(a)-scarcity(b)||a-b;
- });};
- function fill(id:string,seen:Set<number>):boolean{for(const day of candidates(id)){if(seen.has(day))continue;seen.add(day);const occupant=picks.get(day);if(!occupant||(!occupant.locked&&fill(occupant.id,seen))){picks.set(day,{id,reason:"Disponibilitate suplimentară",locked:false});return true;}}return false;}
+ // Preserve the doctor's ranked availability; matching can still resolve overlaps.
+ const candidates=(id:string)=>{const p=byId.get(id)!;return [...p.preferred,...p.available].filter(d=>!picks.get(d)?.locked);};
+ function fill(id:string,seen:Set<number>):boolean{for(const day of candidates(id)){if(seen.has(day))continue;seen.add(day);const occupant=picks.get(day);if(!occupant||(!occupant.locked&&fill(occupant.id,seen))){const p=byId.get(id)!,rank=p.available.indexOf(day);picks.set(day,{id,reason:rank>=0?`Disponibilitate ${rank+1}`:`Preferința ${p.preferred.indexOf(day)+1}`,locked:false});return true;}}return false;}
  let progress=true;
  while(progress){progress=false;for(const id of [...queue]){const p=byId.get(id)!;if((counts.get(id)??0)<p.preferred.length&&fill(id,new Set())){counts.set(id,(counts.get(id)??0)+1);rotate(id);progress=true;}}}
  const allocations=[...picks].sort((a,b)=>a[0]-b[0]).map(([day,p])=>({date:dateKey(month,day),user_id:p.id,points:dayPoints(dateKey(month,day),holidays),reason:p.reason}));
