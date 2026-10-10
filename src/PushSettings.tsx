@@ -17,26 +17,71 @@ function applicationKey(value: string) {
   return Uint8Array.from(decoded, character => character.charCodeAt(0));
 }
 
+type DevicePreference = "enabled" | "disabled";
+const remembered = new Map<string, DevicePreference>();
+function devicePreference(userId: string) {
+  try {
+    const value = localStorage.getItem(`garda.push-device.v1:${userId}`);
+    if (value === "enabled" || value === "disabled") return value;
+  } catch { /* Storage may be restricted by the browser. */ }
+  return remembered.get(userId) ?? null;
+}
+function rememberPreference(userId: string, value: DevicePreference) {
+  remembered.set(userId, value);
+  try { localStorage.setItem(`garda.push-device.v1:${userId}`, value); } catch { /* Keep the choice for this session. */ }
+}
+
+type DeviceState = { worker: ServiceWorkerRegistration; publicKey: string; enabled: boolean };
+const synchronizing = new Map<string, Promise<DeviceState>>();
+function syncDevice(userId: string): Promise<DeviceState> {
+  const pending = synchronizing.get(userId);
+  if (pending) return pending;
+  const promise = (async () => {
+    const [worker, config] = await Promise.all([registerPushWorker(), api("push-config")]);
+    if (!config.publicKey) throw new Error("Notificările nu sunt disponibile momentan.");
+    let subscription = await worker.pushManager.getSubscription();
+    const preference = devicePreference(userId);
+    // Migrate an existing browser permission; a recorded refusal always wins.
+    const wanted = preference === "enabled" || preference === null && Notification.permission === "granted";
+    if (wanted && Notification.permission === "granted") {
+      subscription ??= await worker.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: applicationKey(config.publicKey) });
+      const status = await api("push-status", { endpoint: subscription.endpoint });
+      if (!status.subscribed) await api("push-subscribe", { subscription: subscription.toJSON() });
+      if (preference === null) rememberPreference(userId, "enabled");
+      return { worker, publicKey: config.publicKey, enabled: true };
+    }
+    if (preference === "disabled" && subscription) {
+      await api("push-unsubscribe", { endpoint: subscription.endpoint });
+      await subscription.unsubscribe();
+    }
+    return { worker, publicKey: config.publicKey, enabled: false };
+  })();
+  synchronizing.set(userId, promise);
+  void promise.finally(() => { if (synchronizing.get(userId) === promise) synchronizing.delete(userId); }).catch(() => {});
+  return promise;
+}
+
 export function PushSettings({ userId, compact = false }: { userId: string; compact?: boolean }) {
   const ios = /iPad|iPhone|iPod/.test(navigator.userAgent) || navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1;
   const standalone = matchMedia("(display-mode: standalone)").matches || !!(navigator as Navigator & { standalone?: boolean }).standalone;
   const needsInstall = ios && !standalone;
   const supported = !needsInstall && "Notification" in window && "serviceWorker" in navigator && "PushManager" in window;
-  const [enabled, setEnabled] = useState(false), [busy, setBusy] = useState(false), [ready, setReady] = useState(false), [message, setMessage] = useState(""), [error, setError] = useState("");
+  const [enabled, setEnabled] = useState(() => devicePreference(userId) === "enabled"), [busy, setBusy] = useState(false), [ready, setReady] = useState(false), [checking, setChecking] = useState(supported), [message, setMessage] = useState(""), [error, setError] = useState("");
   const registration = useRef<ServiceWorkerRegistration | null>(null), publicKey = useRef("");
   useEffect(() => {
     if (!supported) return;
     let active = true;
     const refresh = async () => {
       try {
-        const [worker, config] = await Promise.all([registerPushWorker(), api("push-config")]);
-        const subscription = await worker.pushManager.getSubscription();
-        const status = subscription ? await api("push-status", { endpoint: subscription.endpoint }) : null;
-        if (active) { registration.current = worker; publicKey.current = config.publicKey ?? ""; setEnabled(!!status?.subscribed && Notification.permission === "granted"); setReady(!!config.publicKey); setError(""); }
+        const state = await syncDevice(userId);
+        if (active) { registration.current = state.worker; publicKey.current = state.publicKey; setEnabled(state.enabled); setReady(true); setError(""); }
       } catch (cause) { if (active) setError((cause as Error).message); }
+      finally { if (active) setChecking(false); }
     };
-    void refresh(); window.addEventListener("garda-push-changed", refresh);
-    return () => { active = false; window.removeEventListener("garda-push-changed", refresh); };
+    const storage = (event: StorageEvent) => { if (event.key === `garda.push-device.v1:${userId}`) void refresh(); };
+    const visible = () => { if (document.visibilityState === "visible") void refresh(); };
+    void refresh(); window.addEventListener("garda-push-changed", refresh); window.addEventListener("storage", storage); document.addEventListener("visibilitychange", visible);
+    return () => { active = false; window.removeEventListener("garda-push-changed", refresh); window.removeEventListener("storage", storage); document.removeEventListener("visibilitychange", visible); };
   }, [userId, supported]);
   const enable = async () => {
     if (!registration.current || !publicKey.current) return;
@@ -44,10 +89,11 @@ export function PushSettings({ userId, compact = false }: { userId: string; comp
     const permission = Notification.permission === "granted" ? Promise.resolve("granted" as NotificationPermission) : Notification.requestPermission();
     setBusy(true); setError(""); setMessage("");
     try {
-      if (await permission !== "granted") throw new Error("Permite notificările din setările browserului pentru această adresă, apoi încearcă din nou.");
+      if (await permission !== "granted") { rememberPreference(userId, "disabled"); setEnabled(false); throw new Error("Notificările sunt oprite. Le poți permite din setările browserului."); }
       const worker = registration.current;
       const subscription = await worker.pushManager.getSubscription() ?? await worker.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: applicationKey(publicKey.current) });
       await api("push-subscribe", { subscription: subscription.toJSON() });
+      rememberPreference(userId, "enabled");
       setEnabled(true); setMessage("Notificările sunt activate pe acest dispozitiv."); window.dispatchEvent(new Event("garda-push-changed"));
     } catch (cause) { setError((cause as Error).message); }
     finally { setBusy(false); }
@@ -57,6 +103,7 @@ export function PushSettings({ userId, compact = false }: { userId: string; comp
     try {
       const subscription = await registration.current?.pushManager.getSubscription();
       if (subscription) { await api("push-unsubscribe", { endpoint: subscription.endpoint }); await subscription.unsubscribe(); }
+      rememberPreference(userId, "disabled");
       setEnabled(false); setMessage("Notificările sunt dezactivate pe acest dispozitiv."); window.dispatchEvent(new Event("garda-push-changed"));
     } catch (cause) { setError((cause as Error).message); }
     finally { setBusy(false); }
@@ -71,10 +118,11 @@ export function PushSettings({ userId, compact = false }: { userId: string; comp
     } catch (cause) { setError((cause as Error).message); }
     finally { setBusy(false); }
   };
-  if (compact && enabled) return null;
+  // Keep device synchronization mounted without adding a banner to every page.
+  if (compact) return null;
   return <section className={`push-settings ${compact ? "compact" : ""}`}>
-    <div className="push-intro"><Smartphone size={21}/><div><strong>Notificări pe acest dispozitiv</strong><p>{needsInstall ? "Pe iPhone: Safari → Partajare → Adaugă pe ecranul principal. Deschide Garda din pictograma nouă, apoi activează notificările (iOS 16.4 sau mai nou)." : !supported ? "Acest browser nu acceptă notificări push. Folosește o versiune recentă de Chrome, Edge, Firefox sau Safari." : enabled ? "Active pentru înscrieri, program și schimburi, inclusiv când aplicația este închisă." : "Primește anunțurile despre înscrieri, program și schimburi chiar când aplicația este închisă."}</p></div></div>
-    {supported && <div className="push-actions">{enabled ? <><button className="btn secondary small-btn" disabled={busy} onClick={()=>void test()}><Bell size={16}/>Trimite o probă</button><button className="btn ghost small-btn" disabled={busy} onClick={()=>void disable()}><BellOff size={16}/>Dezactivează</button></> : <button className="btn primary small-btn" disabled={busy || !ready} onClick={()=>void enable()}><Bell size={16}/>{busy ? "Se activează…" : "Activează notificările"}</button>}</div>}
+    <div className="push-intro"><Smartphone size={21}/><div><strong>Notificări pe acest dispozitiv</strong><p>{needsInstall ? "Pe iPhone: Safari → Partajare → Adaugă pe ecranul principal, apoi deschide aplicația din pictogramă." : !supported ? "Acest browser nu acceptă notificări push." : checking ? "Se încarcă setarea…" : enabled ? "Activate pe acest dispozitiv." : "Dezactivate pe acest dispozitiv."}</p></div></div>
+    {supported && !checking && <div className="push-actions">{enabled ? <><button className="btn secondary small-btn" disabled={busy || !ready} onClick={()=>void test()}><Bell size={16}/>Trimite o probă</button><button className="btn ghost small-btn" disabled={busy} onClick={()=>void disable()}><BellOff size={16}/>Dezactivează</button></> : <button className="btn primary small-btn" disabled={busy || !ready} onClick={()=>void enable()}><Bell size={16}/>{busy ? "Se activează…" : "Activează notificările"}</button>}</div>}
     {error && <p className="push-error" role="alert">{error}</p>}{message && !compact && <p className="push-message" role="status">{message}</p>}
   </section>;
 }
