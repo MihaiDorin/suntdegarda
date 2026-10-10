@@ -78,3 +78,11 @@
 @media(max-width:700px){.hospital-logo{width:130px}.brand{gap:10px;font-size:1.2rem}.header .brand-sub{display:none}.auth-shell>header .hospital-logo{width:160px}}
 
 .my-row{background:#faf0f1!important}.rank-number.top-rank{background:#fbe7e8;color:#a61d27}.heading-icon{color:#b5222c}.app-dialog{border-color:#e5dedf}
+
+/* Adjacent months stay visible while the calendar scrolls naturally. */
+.calendar-carousel{--calendar-peek:clamp(24px,5vw,64px);--calendar-gap:16px;position:relative;display:flex;align-items:flex-start;gap:var(--calendar-gap);overflow-x:auto;scroll-snap-type:x mandatory;scroll-padding-inline:calc(var(--calendar-peek) + var(--calendar-gap));padding:8px calc(var(--calendar-peek) + var(--calendar-gap)) 12px;scrollbar-width:none;touch-action:pan-x pan-y pinch-zoom;overscroll-behavior-x:contain;user-select:none;-webkit-user-select:none}
+.calendar-carousel::-webkit-scrollbar{display:none}.calendar-carousel[data-dragging=true]{scroll-snap-type:none;cursor:grabbing}
+.calendar-carousel .calendar-card{flex:0 0 100%;min-width:0;scroll-snap-align:center;scroll-snap-stop:always;padding:20px}
+.calendar-carousel .carousel-month-title{text-align:center;font-size:1rem;color:#70696a;margin:0 0 8px}.calendar-carousel [data-active=true] .carousel-month-title{visibility:hidden}
+.calendar-carousel .calendar-grid{margin-top:0}.calendar-carousel:focus-visible{outline-color:#c9242d}
+@media(max-width:640px){.calendar-carousel{--calendar-peek:14px;--calendar-gap:8px;padding-top:4px;padding-bottom:8px}.calendar-carousel .calendar-card{padding:10px 8px;border-radius:12px}.calendar-carousel .carousel-month-title{font-size:.75rem;margin-bottom:6px}.calendar-grid .day-cell{min-height:64px;height:64px;padding:4px 3px;gap:2px;border-radius:10px!important}.calendar-grid .day-top{font-size:.8125rem;min-height:16px}.calendar-grid .day-cell .shift-name{font-size:.625rem;line-height:1.15;-webkit-line-clamp:2}.calendar-grid .day-points{font-size:.625rem;line-height:1.1}.calendar-grid .calendar-cells,.calendar-grid .week-labels{gap:4px}.calendar-grid .week-labels>span{font-size:.625rem;padding:6px 0}.calendar-legend{gap:10px;font-size:.6875rem}}

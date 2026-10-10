@@ -1,5 +1,5 @@
 "use client";
-import { useState,useEffect,useCallback,useRef } from "react";
+import { useState,useEffect,useLayoutEffect,useCallback,useRef } from "react";
 import { Auth,type DoctorProfile } from "./Auth";
 import { PushSettings } from "./PushSettings";
 import { api } from "./api";
@@ -81,28 +81,53 @@ export default function GardaApp(){
  </div>;
 }
 function SchedulePreview({month,data,onMonth,onEnroll}:{month:string;data:Data;onMonth:(m:string)=>void;onEnroll:(m:string)=>void}){
- const [preview,setPreview]=useState<MonthPreview|null>(null),[loading,setLoading]=useState(true),[error,setError]=useState("");
- const version=data.months.find(m=>m.id===month)?.version;
- const swipeStart=useRef<{id:number;x:number;y:number}|null>(null),wheelAt=useRef(0);
+ const [previews,setPreviews]=useState<Record<string,MonthPreview>>({}),[loading,setLoading]=useState(true),[error,setError]=useState("");
+ const offsetMonth=(direction:number)=>{const date=new Date(month+"-01T12:00:00Z");date.setUTCMonth(date.getUTCMonth()+direction);return date.toISOString().slice(0,7);};
+ const months=[offsetMonth(-1),month,offsetMonth(1)].filter(id=>id>="2020-01"&&id<="2099-12");
+ const versions=months.map(id=>data.months.find(m=>m.id===id)?.version??0).join(":");
+ const carousel=useRef<HTMLDivElement|null>(null),activeCard=useRef<HTMLElement|null>(null),scrollTimer=useRef<ReturnType<typeof setTimeout>|null>(null);
+ const mouseDrag=useRef<{id:number;x:number;left:number}|null>(null);
+ const cardPosition=(node:HTMLDivElement,card:HTMLElement)=>card.offsetLeft-(node.clientWidth-card.offsetWidth)/2;
+ const settle=()=>{
+  if(scrollTimer.current)clearTimeout(scrollTimer.current);
+  scrollTimer.current=setTimeout(()=>{
+   const node=carousel.current;if(!node||mouseDrag.current)return;
+   const cards=Array.from(node.querySelectorAll<HTMLElement>("[data-month]"));
+   const nearest=cards.reduce<HTMLElement|null>((best,card)=>!best||Math.abs(cardPosition(node,card)-node.scrollLeft)<Math.abs(cardPosition(node,best)-node.scrollLeft)?card:best,null);
+   if(nearest?.dataset.month&&nearest.dataset.month!==month)onMonth(nearest.dataset.month);
+  },180);
+ };
+ useLayoutEffect(()=>{
+  const node=carousel.current,card=activeCard.current;if(!node||!card)return;
+  const center=()=>{if(mouseDrag.current)return;if(scrollTimer.current)clearTimeout(scrollTimer.current);node.scrollLeft=cardPosition(node,card);};
+  center();const observer=new ResizeObserver(center);observer.observe(node);
+  return()=>{observer.disconnect();if(scrollTimer.current)clearTimeout(scrollTimer.current);};
+ },[month]);
  useEffect(()=>{
   const controller=new AbortController();let running=false;setLoading(true);setError("");
-  const refresh=async()=>{if(running)return;running=true;try{const r=await fetch(`/api/garda?view=preview&month=${encodeURIComponent(month)}`,{cache:"no-store",signal:controller.signal});const result=await r.json() as MonthPreview&{error?:string};if(!r.ok)throw new Error(result.error??"Programul nu a putut fi actualizat.");if(!controller.signal.aborted){setPreview(result);setError("");}}catch(e){if(!controller.signal.aborted)setError((e as Error).message);}finally{running=false;if(!controller.signal.aborted)setLoading(false);}};
+  setPreviews(current=>Object.fromEntries(months.filter(id=>current[id]).map(id=>[id,current[id]])));
+  const refresh=async()=>{if(running)return;running=true;try{await Promise.all(months.map(async id=>{try{const r=await fetch(`/api/garda?view=preview&month=${encodeURIComponent(id)}`,{cache:"no-store",signal:controller.signal});const result=await r.json() as MonthPreview&{error?:string};if(!r.ok)throw new Error(result.error??"Programul nu a putut fi actualizat.");if(!controller.signal.aborted){setPreviews(current=>({...current,[id]:result}));if(id===month)setError("");}}catch(e){if(id===month&&!controller.signal.aborted)setError((e as Error).message);}}));}finally{running=false;if(!controller.signal.aborted)setLoading(false);}};
   void refresh();const timer=setInterval(()=>{if(document.visibilityState==="visible")void refresh();},15000);const focus=()=>void refresh();window.addEventListener("focus",focus);window.addEventListener("garda-data-changed",focus);
   return()=>{controller.abort();clearInterval(timer);window.removeEventListener("focus",focus);window.removeEventListener("garda-data-changed",focus);};
- },[month,data.me?.id,version]);
- const p=preview?.month===month?preview:null;
+ },[month,data.me?.id,versions]);
+ const p=previews[month];
  const name=(id:string)=>data.users.find(u=>u.id===id)?.name??"Medic";
- const move=(direction:number)=>{const date=new Date(month+"-01T12:00:00Z");date.setUTCMonth(date.getUTCMonth()+direction);const id=date.toISOString().slice(0,7);if(id>="2020-01"&&id<="2099-12")onMonth(id);};
+ const scrollToCard=(card:HTMLElement)=>{const node=carousel.current;if(!node)return;node.scrollTo({left:cardPosition(node,card),behavior:window.matchMedia("(prefers-reduced-motion: reduce)").matches?"auto":"smooth"});settle();};
+ const move=(direction:number)=>{const id=offsetMonth(direction);if(id<"2020-01"||id>"2099-12")return;const card=carousel.current?.querySelector<HTMLElement>(`[data-month="${id}"]`);if(card)scrollToCard(card);else onMonth(id);};
+ const finishDrag=()=>{const node=carousel.current;mouseDrag.current=null;if(!node)return;delete node.dataset.dragging;const cards=Array.from(node.querySelectorAll<HTMLElement>("[data-month]"));const nearest=cards.reduce<HTMLElement|null>((best,card)=>!best||Math.abs(cardPosition(node,card)-node.scrollLeft)<Math.abs(cardPosition(node,best)-node.scrollLeft)?card:best,null);if(nearest)scrollToCard(nearest);};
  const sourceLabel=p?.source==="simulation"?"Repartizare live":p?.source==="saved"?"Program provizoriu":p?.source==="final"?"Program definitiv":"Înscrieri nedeschise";
  return <>
   <div className="calendar-month-heading"><button className="icon-btn" aria-label="Luna precedentă" disabled={month==="2020-01"} onClick={()=>move(-1)}><ChevronLeft size={21}/></button><h1 className="capitalize" aria-live="polite">{monthTitle(month)}</h1><button className="icon-btn" aria-label="Luna următoare" disabled={month==="2099-12"} onClick={()=>move(1)}><ChevronRight size={21}/></button></div>
   {error&&<div className="alert error" role="alert"><AlertCircle size={18}/>{error}</div>}
-  {!p?<section className="panel"><Empty icon={loading?RefreshCw:AlertCircle} title={loading?"Se încarcă programul…":"Programul nu este disponibil"} text={loading?undefined:"Reîncarcă pagina pentru a încerca din nou."}/></section>:<>
+  {p&&<>
    <div className="preview-status"><span className={`badge ${p.source==="final"?"published":p.source==="saved"?"draft":p.source==="simulation"?"open":"locked"}`}>{p.status==="open"&&<span className="live-dot"/>}{sourceLabel}</span></div>
    {month===data.today.slice(0,7)&&p.source==="final"&&p.shifts.some(s=>s.date===data.today)&&<div className="today-duty"><CalendarDays size={25}/><div><span>În gardă astăzi · {dateLabel(data.today)}</span><strong>{p.source==="final"&&p.shifts.some(s=>s.date===data.today)?name(p.shifts.find(s=>s.date===data.today)!.user_id):"Programul de azi nu a fost definitivat"}</strong></div></div>}
    <div className="coverage-summary"><span>Zile acoperite <strong>{p.stats.covered}</strong></span><span>Neacoperite <strong>{p.stats.days-p.stats.covered}</strong></span></div>
-   <section className="panel preview-schedule swipe-calendar" role="region" aria-label={`Calendar pentru ${monthTitle(month)}`} tabIndex={0} onPointerDown={event=>{if(!event.isPrimary||event.pointerType==="mouse"&&event.button!==0)return;swipeStart.current={id:event.pointerId,x:event.clientX,y:event.clientY};try{event.currentTarget.setPointerCapture(event.pointerId);}catch{}}} onPointerUp={event=>{const start=swipeStart.current;swipeStart.current=null;if(!start||start.id!==event.pointerId)return;const horizontal=event.clientX-start.x,vertical=event.clientY-start.y;if(Math.abs(horizontal)>=60&&Math.abs(horizontal)>Math.abs(vertical)*1.4)move(horizontal>0?1:-1);}} onPointerCancel={()=>{swipeStart.current=null;}} onKeyDown={event=>{if(event.key==="ArrowRight"||event.key==="ArrowLeft"){event.preventDefault();move(event.key==="ArrowRight"?1:-1);}}} onWheel={event=>{if(Math.abs(event.deltaX)>45&&Math.abs(event.deltaX)>Math.abs(event.deltaY)*1.4&&Date.now()-wheelAt.current>650){wheelAt.current=Date.now();move(event.deltaX>0?1:-1);}}}><CalendarGrid month={month} holidays={p.holidays} shifts={p.shifts} name={name} meId={data.me!.id}/><div className="calendar-legend"><span><i className="preferred-dot"/>Garda ta</span><span><i className="available-dot"/>Garda unui coleg</span><span><i className="unselected-dot"/>Zi neacoperită</span></div></section>
   </>}
+  <div className="calendar-carousel swipe-calendar" ref={carousel} role="region" aria-roledescription="carusel" aria-label="Calendarele lunilor: lunile anterioare în stânga, lunile viitoare în dreapta" tabIndex={0} onScroll={settle} onKeyDown={event=>{if(event.key==="ArrowRight"||event.key==="ArrowLeft"){event.preventDefault();move(event.key==="ArrowRight"?1:-1);}}} onPointerDown={event=>{if(event.pointerType!=="mouse"||!event.isPrimary||event.button!==0)return;mouseDrag.current={id:event.pointerId,x:event.clientX,left:event.currentTarget.scrollLeft};event.currentTarget.dataset.dragging="true";event.currentTarget.setPointerCapture(event.pointerId);}} onPointerMove={event=>{const start=mouseDrag.current;if(!start||start.id!==event.pointerId)return;event.preventDefault();event.currentTarget.scrollLeft=start.left+start.x-event.clientX;}} onPointerUp={event=>{if(mouseDrag.current?.id===event.pointerId)finishDrag();}} onPointerCancel={finishDrag} onLostPointerCapture={()=>{if(mouseDrag.current)finishDrag();}}>
+   {months.map(id=>{const item=previews[id];return <section key={id} data-month={id} data-active={id===month} ref={id===month?activeCard:undefined} className="panel preview-schedule calendar-card" aria-label={`Calendar pentru ${monthTitle(id)}`}><h2 className="carousel-month-title capitalize">{monthTitle(id)}</h2>{item?<CalendarGrid month={id} holidays={item.holidays} shifts={item.shifts} name={name} meId={data.me!.id}/>:<Empty icon={loading?RefreshCw:AlertCircle} title={loading?"Se încarcă…":"Program indisponibil"}/>}</section>;})}
+  </div>
+  {p&&<div className="calendar-legend"><span><i className="preferred-dot"/>Garda ta</span><span><i className="available-dot"/>Garda unui coleg</span><span><i className="unselected-dot"/>Zi neacoperită</span></div>}
   {(data.suggestedMonth||data.months.find(m=>m.id===month)?.status==="open")&&<div className="enrollment-callout"><span>Înscrieri deschise pentru <strong>{monthTitle(data.suggestedMonth??month)}</strong>.</span><button className="btn primary" onClick={()=>onEnroll(data.suggestedMonth??month)}>Alege gărzile preferate</button></div>}
  </>;
 }
