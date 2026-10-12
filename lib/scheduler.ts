@@ -1,26 +1,34 @@
-import { dateKey, monthDays, dayPoints } from "./calendar";
+import { dateKey, monthDays, dayPoints, shiftDate } from "./calendar";
 export type Participant={id:string;name:string;points:number;preferred:number[];available:number[]};
 export type Allocation={date:string;user_id:string;points:number;reason:string};
-export function allocate(month:string,input:Participant[],holidays:Record<string,string>){
- const people=[...input].filter(p=>p.preferred.length).sort((a,b)=>b.points-a.points||a.name.localeCompare(b.name,"ro")||a.id.localeCompare(b.id));
- let queue=people.map(p=>p.id);const initial=[...queue];const byId=new Map(people.map(p=>[p.id,p]));
- const picks=new Map<number,{id:string;reason:string;locked:boolean}>();const counts=new Map(people.map(p=>[p.id,0]));const conflicts:string[]=[];
+export type AllocationOptions={boundary?:Pick<Allocation,"date"|"user_id">[];locked?:Allocation[];force?:boolean;refused?:string[];holidayPoints?:Record<string,number>};
+export function allocate(month:string,input:Participant[],holidays:Record<string,string>,options:AllocationOptions={}){
+ const people=[...input].sort((a,b)=>b.points-a.points||a.name.localeCompare(b.name,"ro")||a.id.localeCompare(b.id));
+ let queue=people.map(p=>p.id);const initial=[...queue],byId=new Map(people.map(p=>[p.id,p]));
+ const picks=new Map<number,{id:string;reason:string}>(),counts=new Map(people.map(p=>[p.id,0])),conflicts:string[]=[];
+ const boundary=new Map((options.boundary??[]).map(s=>[s.date,s.user_id])),refused=new Set(options.refused??[]);
+ for(const s of options.locked??[]){if(s.date.slice(0,7)!==month)continue;const day=Number(s.date.slice(8));picks.set(day,{id:s.user_id,reason:s.reason});counts.set(s.user_id,(counts.get(s.user_id)??0)+1);}
  const rotate=(id:string)=>{queue=queue.filter(x=>x!==id);queue.push(id);};
- for(let rank=0;rank<Math.max(0,...people.map(p=>p.preferred.length));rank++){
-  const visited=new Set<string>();
-  while(true){const id=queue.find(x=>!visited.has(x));if(!id)break;visited.add(id);const p=byId.get(id)!;const day=p.preferred[rank];
-   if(day===undefined||picks.has(day)||(counts.get(id)??0)>=p.preferred.length)continue;
-   const contenders=people.filter(q=>q.preferred[rank]===day&&!visited.has(q.id));
-   if(contenders.length)conflicts.push(`Ziua ${day}, preferința ${rank+1}: ${[p,...contenders].map(q=>q.name).join(", ")}. Prioritate: ${p.name}.`);
-   picks.set(day,{id,reason:`Preferința ${rank+1}`,locked:true});counts.set(id,(counts.get(id)??0)+1);rotate(id);
+ const eligible=(id:string,day:number)=>{if(day<1||day>monthDays(month)||picks.has(day)||refused.has(dateKey(month,day)+":"+id))return false;const date=dateKey(month,day);return picks.get(day-1)?.id!==id&&picks.get(day+1)?.id!==id&&boundary.get(shiftDate(date,-1))!==id&&boundary.get(shiftDate(date,1))!==id;};
+ const take=(id:string,day:number,reason:string)=>{picks.set(day,{id,reason});counts.set(id,(counts.get(id)??0)+1);rotate(id);};
+ // Every doctor's first preference is processed before the second tier;
+ // availability tiers follow the four preference tiers.
+ for(const stage of ["preferred","available"] as const){
+  for(let position=0;position<Math.max(0,...people.map(p=>p[stage].length));position++){const visited=new Set<string>();
+   while(true){const id=queue.find(id=>!visited.has(id));if(!id)break;visited.add(id);const p=byId.get(id)!;
+    if((counts.get(id)??0)>=p.preferred.length)continue;
+    const day=p[stage][position];if(day===undefined||!eligible(id,day))continue;
+    const rank=position+1;
+    if(stage==="preferred"){const contenders=people.filter(other=>other.id!==id&&other.preferred.includes(day)&&(counts.get(other.id)??0)<other.preferred.length);if(contenders.length)conflicts.push("Ziua "+day+": "+[p,...contenders].map(q=>q.name).join(", ")+". Prioritate în această rundă: "+p.name+".");}
+    take(id,day,(stage==="preferred"?"Preferința ":"Disponibilitate ")+rank);
+   }
   }
  }
- // Preserve the doctor's ranked availability; matching can still resolve overlaps.
- const candidates=(id:string)=>{const p=byId.get(id)!;return [...p.preferred,...p.available].filter(d=>!picks.get(d)?.locked);};
- function fill(id:string,seen:Set<number>):boolean{for(const day of candidates(id)){if(seen.has(day))continue;seen.add(day);const occupant=picks.get(day);if(!occupant||(!occupant.locked&&fill(occupant.id,seen))){const p=byId.get(id)!,rank=p.available.indexOf(day);picks.set(day,{id,reason:rank>=0?`Disponibilitate ${rank+1}`:`Preferința ${p.preferred.indexOf(day)+1}`,locked:false});return true;}}return false;}
- let progress=true;
- while(progress){progress=false;for(const id of [...queue]){const p=byId.get(id)!;if((counts.get(id)??0)<p.preferred.length&&fill(id,new Set())){counts.set(id,(counts.get(id)??0)+1);rotate(id);progress=true;}}}
- const allocations=[...picks].sort((a,b)=>a[0]-b[0]).map(([day,p])=>({date:dateKey(month,day),user_id:p.id,points:dayPoints(dateKey(month,day),holidays),reason:p.reason}));
+ if(options.force){
+  let bottom=[...people].sort((a,b)=>a.points-b.points||a.name.localeCompare(b.name,"ro")||a.id.localeCompare(b.id)).map(p=>p.id);
+  for(let day=1;day<=monthDays(month);day++){if(picks.has(day))continue;const id=bottom.find(id=>eligible(id,day));if(!id)continue;take(id,day,"Repartizare automată din coada clasamentului");bottom=bottom.filter(x=>x!==id);bottom.push(id);}
+ }
+ const allocations=[...picks].sort((a,b)=>a[0]-b[0]).map(([day,p])=>({date:dateKey(month,day),user_id:p.id,points:dayPoints(dateKey(month,day),holidays,options.holidayPoints),reason:p.reason}));
  const uncovered=Array.from({length:monthDays(month)},(_,i)=>i+1).filter(d=>!picks.has(d));
  const deficits=people.filter(p=>(counts.get(p.id)??0)<p.preferred.length).map(p=>({id:p.id,name:p.name,requested:p.preferred.length,assigned:counts.get(p.id)??0}));
  return {allocations,report:{initialQueue:initial,finalQueue:queue,conflicts,uncovered,deficits,requested:people.reduce((n,p)=>n+p.preferred.length,0)}};

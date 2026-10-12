@@ -2,7 +2,7 @@ import { buildPushPayload, type VapidKeys } from "@block65/webcrypto-web-push";
 import { z } from "zod";
 import { ADMIN_EMAIL } from "@/lib/team";
 import { db, digest, fail, now, uuid, type User } from "@/lib/server";
-import { monthTitle } from "@/lib/calendar";
+import { monthTitle, todayRO } from "@/lib/calendar";
 
 const subscriptionSchema = z.object({
   endpoint: z.string().url().max(2048),
@@ -84,21 +84,23 @@ export async function removePushDevice(userId: string, endpoint: string) {
   await db().prepare("DELETE FROM push_subscriptions WHERE id=? AND user_id=?").bind(await digest(endpoint), userId).run();
 }
 
-type Delivery = { id: string; subscription_id: string; notification_id: string; endpoint: string; p256dh: string; auth: string; message: string; attempts: number };
+type Delivery = { id: string; subscription_id: string; notification_id: string; user_id:string; endpoint: string; p256dh: string; auth: string; message: string; attempts: number };
 export async function flushPush() {
   const claim = uuid(), time = Date.now();
   // Atomic leases prevent concurrent requests/cron from sending the same job together.
-  await db().prepare("UPDATE push_deliveries SET claim=?,attempts=attempts+1,retry_at=? WHERE id IN (SELECT d.id FROM push_deliveries d JOIN push_subscriptions s ON s.id=d.subscription_id JOIN users u ON u.id=s.user_id WHERE d.done=0 AND d.retry_at<=? AND d.attempts<5 AND u.active=1 AND u.listed=1 AND u.password<>'' ORDER BY d.created LIMIT 10)").bind(claim, time + 60000, time).run();
-  const deliveries = (await db().prepare("SELECT d.id,d.subscription_id,d.notification_id,d.attempts,s.endpoint,s.p256dh,s.auth,n.message FROM push_deliveries d JOIN push_subscriptions s ON s.id=d.subscription_id JOIN notifications n ON n.id=d.notification_id AND n.user_id=s.user_id WHERE d.claim=? AND d.done=0").bind(claim).all()).results as Delivery[];
+  await db().prepare("UPDATE push_deliveries SET claim=?,attempts=attempts+1,retry_at=? WHERE id IN (SELECT d.id FROM push_deliveries d JOIN push_subscriptions s ON s.id=d.subscription_id JOIN users u ON u.id=s.user_id WHERE d.done=0 AND d.retry_at<=? AND d.attempts<5 AND u.active=1 AND u.listed=1 AND u.password<>'' ORDER BY CASE WHEN d.notification_id LIKE 'duty-reminder:%' THEN 0 ELSE 1 END,d.created LIMIT 10)").bind(claim, time + 60000, time).run();
+  const deliveries = (await db().prepare("SELECT d.id,d.subscription_id,d.notification_id,d.attempts,s.endpoint,s.p256dh,s.auth,n.message,n.user_id FROM push_deliveries d JOIN push_subscriptions s ON s.id=d.subscription_id JOIN notifications n ON n.id=d.notification_id AND n.user_id=s.user_id WHERE d.claim=? AND d.done=0").bind(claim).all()).results as Delivery[];
   if (!deliveries.length) return;
   const keys = await vapidKeys();
   await Promise.all(deliveries.map(async delivery => {
     let status = 0;
     try {
+      const reminder=delivery.notification_id.startsWith("duty-reminder:");
+      if(reminder){const date=delivery.notification_id.slice(14,24);if(date<=todayRO()||!await db().prepare("SELECT s.date FROM shifts s JOIN months m ON m.id=s.month WHERE s.date=? AND s.user_id=? AND m.status IN ('published','completed')").bind(date,delivery.user_id).first()){await db().prepare("UPDATE push_deliveries SET done=-1,claim=NULL WHERE id=? AND claim=?").bind(delivery.id,claim).run();return;}}
       validEndpoint(delivery.endpoint);
       const payload = await buildPushPayload({
         data: JSON.stringify({ title: "Sunt de gardă", body: delivery.message, tag: `garda-${delivery.notification_id}`, url: "/?notifications=1" }),
-        options: { ttl: 86400 },
+        options: { ttl: reminder?25200:86400 },
       }, { endpoint: delivery.endpoint, expirationTime: null, keys: { p256dh: delivery.p256dh, auth: delivery.auth } }, keys);
       const response = await fetch(delivery.endpoint, { ...payload, redirect: "manual", signal: AbortSignal.timeout(7000) });
       status = response.status;
