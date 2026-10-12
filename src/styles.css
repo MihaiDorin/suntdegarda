@@ -90,3 +90,26 @@
 
 /* Team rules and uncovered-day registration. */
 .rules-page{max-width:1080px;margin:0 auto;display:grid;gap:18px}.rules-page h2{margin-bottom:14px}.rules-page ol{margin:0;padding-left:23px;color:#575154;font-size:.9375rem;line-height:1.7}.rules-page li+li{margin-top:10px}.rules-page li::marker{color:#b5222c;font-weight:700}.badge.filling{background:#fbe7e8;color:#a61d27}.major-holiday-dot{background:#c9242d}.refusal-list{margin-top:20px}.refusal-list>p{margin-top:8px}.refusal-row{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:14px 0;border-bottom:1px solid #ece4e6;font-size:.875rem}.refusal-row:last-child{border-bottom:0}.holiday-form select{min-height:42px;border:1px solid #ded4d6;border-radius:8px;padding:8px;background:#fff;color:#4d4648;font:inherit;width:100%}.main-tabs{gap:16px;flex-wrap:wrap;height:auto!important;min-height:48px;overflow:visible}.main-tabs [data-slot=tabs-trigger]{flex:0 1 auto}@media(max-width:640px){.rules-page{gap:12px}.rules-page .panel{padding:18px}.rules-page ol{font-size:.875rem}.main-tabs{column-gap:12px;row-gap:0}.main-tabs [data-slot=tabs-trigger]{font-size:.75rem;gap:4px}.refusal-row{align-items:flex-start}.refusal-row .btn{flex-shrink:0}}
+
+/* Emblem-only branding and a quiet, compact calendar workspace. */
+.hospital-logo,.auth-shell>header .hospital-logo{width:48px;height:48px;object-fit:contain}
+.brand{gap:12px}
+.brand>span{font-family:"Calibri Light","Avenir Next","Century Gothic",Calibri,"Helvetica Neue",Arial,sans-serif;font-weight:300;letter-spacing:.16em;text-transform:uppercase;font-size:1.8rem;line-height:1.1}
+.brand-sub{font-family:Arial,sans-serif;font-size:.75rem;letter-spacing:0;text-transform:none}
+.calendar-carousel{touch-action:pan-y pinch-zoom;-webkit-touch-callout:none;overscroll-behavior-x:contain}
+.calendar-carousel *{-webkit-touch-callout:none}
+.selection-heading{margin-bottom:12px;gap:12px}
+.selection-heading h2{margin:0;font-size:1.3rem}
+.selection-heading>.muted{font-size:.75rem;white-space:nowrap}
+.selection-panel>.calendar-grid{margin-top:0}
+.selection-panel>.muted{margin-top:16px}
+.enrollment-status{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin:16px 0;color:#70696a;font-size:.75rem}
+.coverage-summary{padding:8px 0 12px}
+.preview-status{margin-top:12px}
+@media(max-width:640px){
+ .hospital-logo,.auth-shell>header .hospital-logo{width:38px;height:38px}
+ .brand>span{font-size:1.4rem}
+ .brand{gap:10px}
+ .selection-heading h2{font-size:1.15rem}
+ .workspace{padding-top:8px}
+}
