@@ -1,5 +1,6 @@
 import { db } from "@/lib/server";
 import { initializeTeam } from "./accounts";
+import { initializeRulesHistory, runMonthlyLifecycle } from "./planning";
 
 const statements: string[] = [
   "CREATE TABLE IF NOT EXISTS `audit` (\n\t`id` text PRIMARY KEY NOT NULL,\n\t`user_id` text NOT NULL,\n\t`action` text NOT NULL,\n\t`created` text NOT NULL\n);",
@@ -32,8 +33,11 @@ const statements: string[] = [
 let ready: Promise<void> | undefined;
 
 export function ensureSchema(): Promise<void> {
-  ready ??= db().batch(statements.map(sql => db().prepare(sql)))
+  ready ??= db().prepare("SELECT name FROM sqlite_master WHERE type IN ('table','index','trigger')").all()
+    .then(async existing => { const names=new Set(existing.results.map(row=>String(row.name)));const missing=statements.filter(sql=>{const name=sql.match(/CREATE (?:UNIQUE )?(?:TABLE|INDEX|TRIGGER) IF NOT EXISTS\s+[\x60\"']?([A-Za-z0-9_]+)/i)?.[1];return !name||!names.has(name);});if(missing.length)await db().batch(missing.map(sql=>db().prepare(sql))); })
     .then(() => initializeTeam())
+    .then(() => initializeRulesHistory())
+    .then(() => runMonthlyLifecycle())
     .catch(error => { ready = undefined; throw error; });
   return ready;
 }

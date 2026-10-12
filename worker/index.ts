@@ -1,6 +1,7 @@
 import { GET, POST } from "./api";
 import { ensureSchema } from "./schema";
-import { closeExpiredEnrollments, flushPush } from "./push";
+import { flushPush } from "./push";
+import { runMonthlyLifecycle, sendDutyReminders } from "./planning";
 
 interface Env {
   DB: D1Database;
@@ -37,7 +38,7 @@ export default {
     }
     return env.ASSETS.fetch(request);
   },
-  async scheduled(_controller: ScheduledController, _env: Env, ctx: ExecutionContext) {
-    ctx.waitUntil((async () => { await ensureSchema(); await closeExpiredEnrollments(); await flushPush(); })());
+  async scheduled(controller: ScheduledController, _env: Env, ctx: ExecutionContext) {
+    ctx.waitUntil((async () => { await ensureSchema(); await runMonthlyLifecycle(); await sendDutyReminders(new Date(controller.scheduledTime)); await flushPush(); })());
   },
 } satisfies ExportedHandler<Env>;
