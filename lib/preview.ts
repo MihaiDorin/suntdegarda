@@ -32,7 +32,7 @@ export async function getMonthPreview(month:string,userId?:string):Promise<Month
  const status=m?.status??"locked";
  const source:MonthPreview["source"]=["open","closed"].includes(status)?"simulation":["draft","filling"].includes(status)?"saved":["published","completed"].includes(status)?"final":"empty";
  const participants:Participant[]=users.filter(u=>u.active&&u.listed).map(u=>{const sub=submissions.find(s=>s.user_id===u.id);return {id:u.id,name:u.name,points:u.points,preferred:sub?.preferred??[],available:sub?.available??[]};});
- const calculated=source==="simulation"?allocate(month,participants,holidays,{holidayPoints,boundary:results[5].results as {date:string;user_id:string}[],refused:results[6].results.map(s=>String(s.date)+":"+String(s.user_id))}):null;
+ const calculated=source==="simulation"?allocate(month,participants,holidays,{holidayPoints,boundary:results[5].results as {date:string;user_id:string}[],refused:(results[6].results as {date:string;user_id:string}[]).map(s=>s.date+":"+s.user_id)}):null;
  const shifts:PreviewShift[]=calculated?calculated.allocations.map(a=>({...a,month,completed:0})):source==="empty"?[]:results[3].results as PreviewShift[];
  const recordedReport=m?JSON.parse(m.report) as {conflicts?:string[]}:{};
  const doctors=users.filter(u=>submissions.some(s=>s.user_id===u.id)&&(source!=="simulation"||u.active)||shifts.some(s=>s.user_id===u.id)).map(u=>{
