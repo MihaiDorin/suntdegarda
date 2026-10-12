@@ -113,3 +113,41 @@
  .selection-heading h2{font-size:1.15rem}
  .workspace{padding-top:8px}
 }
+
+/* Stable cached month cards, compact days and a roster that fits the phone. */
+.calendar-carousel{overflow-y:hidden;transition:height .22s ease}
+.calendar-grid .day-cell{height:80px;min-height:80px}
+.calendar-grid .day-cell .shift-name{-webkit-line-clamp:1;overflow-wrap:normal;white-space:nowrap;font-size:.85rem}
+.admin-page,.admin-page>.panel,.admin-page>.admin-details,.admin-layout,.admin-layout>.panel{min-width:0;max-width:100%;width:100%;box-sizing:border-box}
+.admin-page .admin-layout{grid-template-columns:minmax(0,1fr)}
+.doctor-roster{display:grid;width:100%;min-width:0}
+.doctor-roster-row{display:flex;align-items:center;gap:14px;padding:16px 0;border-top:1px solid #e5dedf;min-width:0}
+.doctor-roster-name{flex:1;min-width:0;overflow-wrap:anywhere}
+.doctor-roster-name strong{display:block}
+.doctor-roster-row>.btn,.doctor-roster-row>.badge,.roster-owner{flex-shrink:0}
+.roster-owner{font-size:.75rem;color:#70696a}
+@media(max-width:700px){
+ .admin-page .admin-desktop-only{display:none!important}
+ .admin-page .page-heading{margin-bottom:14px;flex-wrap:wrap;gap:8px}
+ .admin-page .page-heading h1{font-size:1.6rem}
+ .admin-page .team-panel{padding:16px}
+ .admin-page .add-doctor-form{width:100%;min-width:0;gap:10px;margin-bottom:18px}
+ .admin-page .add-doctor-form label,.admin-page .add-doctor-form input,.admin-page .add-doctor-form .btn{width:100%;min-width:0;max-width:100%;box-sizing:border-box}
+ .admin-page input{font-size:16px}
+ .doctor-roster-row{gap:10px;font-size:.875rem;padding:13px 0}
+ .doctor-roster-row .small-btn{padding:8px 10px;gap:5px}
+}
+@media(max-width:640px){
+ .calendar-carousel-frame,.calendar-carousel{--calendar-peek:0px;--calendar-gap:0px}
+ .calendar-carousel{padding-left:0;padding-right:0;scroll-padding-inline:0}
+ .calendar-carousel .calendar-card{flex-basis:100%;padding:10px 8px}
+ .calendar-carousel .carousel-month-title{padding:0 32px;margin-bottom:10px}
+ .carousel-arrow{top:27px;width:30px;height:32px;border:0;box-shadow:none;background:transparent;border-radius:8px}
+ .carousel-arrow.previous{left:6px}
+ .carousel-arrow.next{right:6px}
+ .calendar-grid .day-cell{height:50px;min-height:50px;padding:4px 3px;gap:3px}
+ .calendar-grid .day-cell .shift-name{font-size:.68rem;line-height:1.15}
+ .calendar-grid .day-top{font-size:.8rem;min-height:16px}
+ .calendar-grid .calendar-cells,.calendar-grid .week-labels{gap:4px}
+}
+@media(prefers-reduced-motion:reduce){.calendar-carousel{transition:none}}
