@@ -5,7 +5,7 @@ import { ADMIN_EMAIL,normalizeDoctorName,unclaimedEmail } from "@/lib/team";
 import { setupComplete as setupDone,publicDoctors,validSetupToken,resetAccounts } from "./accounts";
 import { allocate,type Participant } from "@/lib/scheduler";
 import { getMonthPreview } from "@/lib/preview";
-import { monthDays,monthTitle,dateKey,dateLabel,holidayMap,dayPoints,validateSelection,todayRO } from "@/lib/calendar";
+import { monthDays,monthTitle,dateKey,dateLabel,holidayMap,dayPoints,validateSelection,todayRO,dutyDateRO } from "@/lib/calendar";
 import { isWeekend } from "@/lib/calendar";
 import { registrationStage, registrationDates, bucharestTimestamp } from "@/lib/rules";
 import { scoredUsers, holidayCalendar, buildAllocation, assertNoConsecutive, assertProgramSpacing, weekendAvailable, transitionPlanning, refuseAssignedShift } from "./planning";
@@ -52,7 +52,7 @@ export async function GET(request:Request){try{
   holidayCalendar(year)
  ]);
  const [users,months,submissions,shifts,swaps,notifications,holidays,futureShifts,events,suggestion,calendar]=results;
- return json({me:safeUser(user),setupComplete,emailReady,doctors:await publicDoctors(),accountResetPending:admin&&!await db().prepare("SELECT value FROM settings WHERE key='accounts_reset_v2'").first(),suggestedMonth:suggestion?.id??null,users:users.map(u=>({id:u.id,name:u.name,role:isAdmin(u)?"admin":"doctor",active:u.active,listed:u.listed,registered:u.registered,points:u.points,base_points:u.base_points,...(admin?{email:u.registered?u.email:undefined}:{})})),months:months.results.map(m=>({...m,report:admin?parseJSON(String(m.report),{}):{}})),submissions:submissions.results.map(s=>({...s,preferred:parseJSON(String(s.preferred),[]),available:parseJSON(String(s.available),[])})),shifts:shifts.results,swaps:swaps.results,notifications:notifications.results,holidays,holidayPoints:calendar.holidayPoints,futureShifts:futureShifts.results,events:events.results,today:todayRO()});
+ return json({me:safeUser(user),setupComplete,emailReady,doctors:await publicDoctors(),accountResetPending:admin&&!await db().prepare("SELECT value FROM settings WHERE key='accounts_reset_v2'").first(),suggestedMonth:suggestion?.id??null,users:users.map(u=>({id:u.id,name:u.name,role:isAdmin(u)?"admin":"doctor",active:u.active,listed:u.listed,registered:u.registered,points:u.points,base_points:u.base_points,...(admin?{email:u.registered?u.email:undefined}:{})})),months:months.results.map(m=>({...m,report:admin?parseJSON(String(m.report),{}):{}})),submissions:submissions.results.map(s=>({...s,preferred:parseJSON(String(s.preferred),[]),available:parseJSON(String(s.available),[])})),shifts:shifts.results,swaps:swaps.results,notifications:notifications.results,holidays,holidayPoints:calendar.holidayPoints,futureShifts:futureShifts.results,events:events.results,today:todayRO(),dutyDate:dutyDateRO()});
  }catch(error){return onError(error);}}
 
 export async function POST(request:Request){try{
@@ -162,11 +162,18 @@ export async function POST(request:Request){try{
  if(!isAdmin(user))fail("Această acțiune este disponibilă doar administratorului.",403);
  if(action==="doctor-add"){
   const c=z.object({name:z.string().trim().min(2).max(80)}).parse(body);
-  const names=(await db().prepare("SELECT name FROM users WHERE listed=1").all()).results;
-  if(names.some(u=>normalizeDoctorName(String(u.name))===normalizeDoctorName(c.name)))fail("Acest medic este deja în listă.",409);
-  const id=uuid();
-  await db().batch([db().prepare("INSERT INTO users(id,name,email,password,role,active,base_points,created,listed) VALUES(?,?,?,'','doctor',1,0,?,1)").bind(id,c.name,unclaimedEmail(id),now()),audit(user.id,`Medic adăugat în echipă: ${c.name}`)]);
+  const doctors=(await db().prepare("SELECT id,name,listed FROM users ORDER BY listed DESC,created").all()).results as {id:string;name:string;listed:number}[];
+  const existing=doctors.find(u=>normalizeDoctorName(u.name)===normalizeDoctorName(c.name));
+  if(existing?.listed)fail("Acest medic este deja în listă.",409);
+  const id=existing?.id??uuid();
+  await db().batch([existing?db().prepare("UPDATE users SET listed=1,active=1 WHERE id=?").bind(id):db().prepare("INSERT INTO users(id,name,email,password,role,active,base_points,created,listed) VALUES(?,?,?,'','doctor',1,0,?,1)").bind(id,c.name,unclaimedEmail(id),now()),audit(user.id,`${existing?"Medic readăugat":"Medic adăugat"} în echipă: ${c.name}`)]);
   return json({ok:true,id});
+ }
+ if(action==="doctor-remove"){
+  const c=z.object({id:z.string().min(1)}).parse(body),target=await db().prepare("SELECT * FROM users WHERE id=?").bind(c.id).first<User>();
+  if(!target?.listed)fail("Medicul nu este în lista echipei.");if(isAdmin(target))fail("Contul administratorului nu poate fi șters.",409);
+  await db().batch([db().prepare("UPDATE users SET listed=0,active=0 WHERE id=?").bind(c.id),db().prepare("DELETE FROM sessions WHERE user_id=?").bind(c.id),db().prepare("DELETE FROM resets WHERE user_id=?").bind(c.id),db().prepare("DELETE FROM push_subscriptions WHERE user_id=?").bind(c.id),audit(user.id,`Medic scos din echipă; istoric păstrat: ${target.name}`)]);
+  return json({ok:true});
  }
  if(action==="reset-accounts"){
   z.object({confirmation:z.literal("RESETARE")}).parse(body);

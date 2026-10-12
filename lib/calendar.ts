@@ -27,3 +27,9 @@ export function validateSelection(month:string,preferred:number[],available:numb
  if(all.some(d=>!Number.isInteger(d)||d<1||d>days)||new Set(all).size!==all.length)throw new Error("Selectează zile distincte, valide pentru luna aleasă.");
  if(available.length<preferred.length)throw new Error(`Mai selectează ${preferred.length-available.length} zile suplimentare de disponibilitate.`);
 }
+
+// A shift belongs to its start date until 08:00 the next morning in Romania.
+export function dutyDateRO(time=new Date()){
+ const parts=Object.fromEntries(new Intl.DateTimeFormat("sv-SE",{timeZone:"Europe/Bucharest",year:"numeric",month:"2-digit",day:"2-digit",hour:"2-digit",hourCycle:"h23"}).formatToParts(time).map(p=>[p.type,p.value]));
+ const date=parts.year+"-"+parts.month+"-"+parts.day;return Number(parts.hour)<8?shiftDate(date,-1):date;
+}
