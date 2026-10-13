@@ -3,7 +3,7 @@ import { useState,useEffect,useLayoutEffect,useCallback,useRef,useMemo } from "r
 import { Auth,type DoctorProfile } from "./Auth";
 import { PushSettings } from "./PushSettings";
 import { api } from "./api";
-import { CalendarDays,ChevronLeft,ChevronRight,Check,Plus,Clock,LockKeyhole,Users,ArrowLeftRight,Bell,LogOut,ShieldCheck,Trophy,CheckCircle2,AlertCircle,Download,RefreshCw,Settings2,Mail,Eye,BookOpen,Trash2,X,GripVertical } from "lucide-react";
+import { CalendarDays,ChevronLeft,ChevronRight,Check,Plus,Clock,LockKeyhole,Users,ArrowLeftRight,Bell,LogOut,ShieldCheck,Trophy,CheckCircle2,AlertCircle,Download,RefreshCw,Settings2,Mail,Eye,BookOpen,Trash2,X,GripVertical,Film,Play,Pause,SkipBack,SkipForward } from "lucide-react";
 import { Tabs,TabsList,TabsTrigger,TabsContent } from "@/components/ui/tabs";
 import { Dialog,DialogContent,DialogHeader,DialogTitle,DialogDescription } from "@/components/ui/dialog";
 import { Select,SelectTrigger,SelectValue,SelectContent,SelectItem } from "@/components/ui/select";
@@ -11,7 +11,7 @@ import { AlertDialog,AlertDialogContent,AlertDialogHeader,AlertDialogTitle,Alert
 import { Switch } from "@/components/ui/switch";
 import { Table,TableHeader,TableHead,TableRow,TableBody,TableCell } from "@/components/ui/table";
 import { Toaster,toast } from "sonner";
-import type { MonthPreview } from "@/lib/preview";
+import type { MonthPreview,MonthAnimation } from "@/lib/preview";
 import { monthNames,monthDays,monthTitle,dateKey,dateLabel,dayPoints,todayRO,validateSelection,isWeekend,shiftDate,shiftMonth,dutyDateRO } from "@/lib/calendar";
 import { RULE_SECTIONS, registrationStage, registrationDates } from "@/lib/rules";
 type Person={id:string;name:string;email?:string;role:string;active:number;listed:number;registered:number;points:number;base_points:number;credited_shifts:number};
@@ -70,7 +70,7 @@ export default function GardaApp(){
   <main className="workspace"><PushSettings userId={me.id} compact/>
    {loadError&&<div className="alert error"><AlertCircle size={18}/><span>{loadError}</span><button onClick={()=>void load()}>Reîncearcă</button></div>}
    <Tabs value={tab} onValueChange={changeTab}>
-    <div className="nav-row"><TabsList className="main-tabs" variant="line"><TabsTrigger value="preview"><Eye/>Vizualizare</TabsTrigger><TabsTrigger value="calendar"><CheckCircle2/>Înscrieri</TabsTrigger><TabsTrigger value="points"><Trophy/>Punctaje</TabsTrigger><TabsTrigger value="swaps"><ArrowLeftRight/>Schimburi{data.swaps.some(s=>s.status==="pending"&&s.recipient===me.id)&&<span className="tab-dot"/>}</TabsTrigger><TabsTrigger value="rules"><BookOpen/>Reguli</TabsTrigger>{admin&&<TabsTrigger value="admin"><Settings2/>Administrare</TabsTrigger>}</TabsList></div>
+    <div className="nav-row"><TabsList className="main-tabs" variant="line"><TabsTrigger value="preview"><Eye/>Vizualizare</TabsTrigger><TabsTrigger value="calendar"><CheckCircle2/>Înscrieri</TabsTrigger><TabsTrigger value="points"><Trophy/>Punctaje</TabsTrigger><TabsTrigger value="swaps"><ArrowLeftRight/>Schimburi{data.swaps.some(s=>s.status==="pending"&&s.recipient===me.id)&&<span className="tab-dot"/>}</TabsTrigger><TabsTrigger value="rules"><BookOpen/>Reguli</TabsTrigger>{admin&&<><TabsTrigger value="animation"><Film/>Animație</TabsTrigger><TabsTrigger value="admin"><Settings2/>Administrare</TabsTrigger></>}</TabsList></div>
     <TabsContent value="calendar">
      {selected.status==="filling"&&registrationStage(enrollmentMonth,data.today)==="filling"?<UncoveredEnrollment month={enrollmentMonth} data={data} selected={selected} busy={busy} act={act} attempt={attempt}/>:selected.status==="open"&&registrationStage(enrollmentMonth,data.today)==="open"&&(!selected.deadline||selected.deadline>new Date().toISOString())?<Selection key={`${enrollmentMonth}:${me.id}`} month={enrollmentMonth} data={data} busy={busy} save={(preferred,available)=>act("submit",{month:enrollmentMonth,preferred,available},"Preferințele și disponibilitatea au fost înregistrate.")}/>:<Schedule month={enrollmentMonth} data={data} selected={selected} admin={!!admin} busy={busy} name={name} act={act} confirm={confirm} attempt={attempt} onSwap={()=>setTab("swaps")}/>}
      <div className="enrollment-status"><Badge status={selected.status}/>{selected.deadline&&["open","filling"].includes(selected.status)&&<span>Înscrieri până la {new Date(selected.deadline).toLocaleString("ro-RO",{timeZone:"Europe/Bucharest"})} (ora României)</span>}</div>
@@ -80,6 +80,7 @@ export default function GardaApp(){
     <TabsContent value="points"><div className="page-heading"><div><h1>Punctaje</h1></div><div className="score-key"><span><i className="weekday-dot"/>1 P · luni–vineri</span><span><i className="weekend-dot"/>3 P · weekend</span><span><i className="holiday-dot"/>5 P · sărbătoare</span><span><i className="major-holiday-dot"/>10 P · sărbătoare mare</span></div></div><div className="ranking-layout"><section className="panel ranking"><Table><TableHeader><TableRow><TableHead>Loc</TableHead><TableHead>Medic</TableHead><TableHead>Puncte</TableHead><TableHead>Gărzi punctate</TableHead></TableRow></TableHeader><TableBody>{data.users.filter(u=>u.active).sort((a,b)=>b.points-a.points||a.name.localeCompare(b.name,"ro")).map((u,i)=><TableRow key={u.id} className={u.id===me.id?"my-row":""}><TableCell><span className={`rank-number ${i<3?"top-rank":""}`}>{i+1}</span></TableCell><TableCell><span className="person-cell"><span className="avatar small">{initials(u.name)}</span><span>{u.name}{u.id===me.id&&<small>Tu</small>}</span></span></TableCell><TableCell><strong>{u.points} P</strong></TableCell><TableCell>{u.credited_shifts??0}<small className="inline-muted"> în {year}</small></TableCell></TableRow>)}</TableBody></Table></section><Rules expanded/></div></TabsContent>
     <TabsContent value="rules"><RulesPage/></TabsContent>
     <TabsContent value="swaps"><Swaps data={data} name={name} busy={busy} act={act} attempt={attempt} confirm={confirm}/></TabsContent>
+    {admin&&<TabsContent value="animation"><AllocationAnimation key={`${enrollmentMonth}:${me.id}`} month={enrollmentMonth} data={data}/></TabsContent>}
     {admin&&<TabsContent value="admin"><Administration data={data} year={year} busy={busy} act={act} attempt={attempt} confirm={confirm}/></TabsContent>}
    </Tabs>
   </main>
@@ -171,16 +172,57 @@ function SchedulePreview({month,data,onMonth,onEnroll}:{month:string;data:Data;o
 
 function Rules({expanded=false}:{expanded?:boolean}){return <details className="panel rules"><summary>Punctajul gărzilor</summary><div className="point-rule"><span>1 P</span><p>Luni–vineri</p></div><div className="point-rule weekend-rule"><span>3 P</span><p>Weekend</p></div><div className="point-rule holiday-rule"><span>5 P</span><p>Sărbătoare legală</p></div><div className="point-rule holiday-rule"><span>10 P</span><p>Sărbătoare mare</p></div>{expanded&&<p className="rule-note">Regulamentul complet este în tabul „Reguli”. Refuzurile se scad din punctaj; gărzile consecutive nu se atribuie.</p>}</details>;}
 function RulesPage(){return <><div className="page-heading"><div><h1>Reguli</h1><p>Regulamentul echipei pentru înscrieri, repartizare și punctaje.</p></div></div><div className="rules-page">{RULE_SECTIONS.map((section,index)=><section className="panel" key={section.title}><h2>{section.title}</h2><ol start={1+RULE_SECTIONS.slice(0,index).reduce((n,s)=>n+s.items.length,0)}>{section.items.map(item=><li key={item}>{item}</li>)}</ol></section>)}</div></>;}
-function CalendarGrid({month,holidays,holidayPoints={},preferred=[],available=[],stage,onSelect,shifts=[],name,meId,onShift,showUncovered=false}:{month:string;holidays:Record<string,string>;holidayPoints?:Record<string,number>;preferred?:number[];available?:number[];stage?:number;onSelect?:(d:number)=>void;shifts?:Shift[];name?:(id:string)=>string;meId?:string;onShift?:(d:number)=>void;showUncovered?:boolean}){
+function CalendarGrid({month,holidays,holidayPoints={},preferred=[],available=[],stage,onSelect,shifts=[],name,meId,onShift,showUncovered=false,highlightedDay}:{month:string;holidays:Record<string,string>;holidayPoints?:Record<string,number>;preferred?:number[];available?:number[];stage?:number;onSelect?:(d:number)=>void;shifts?:Shift[];name?:(id:string)=>string;meId?:string;onShift?:(d:number)=>void;showUncovered?:boolean;highlightedDay?:number}){
  const offset=(new Date(month+"-01T12:00:00Z").getUTCDay()+6)%7;const cells=Math.ceil((offset+monthDays(month))/7)*7;
  return <div className="calendar-grid"><div className="week-labels">{["Lun","Mar","Mie","Joi","Vin","Sâm","Dum"].map((d,i)=><span key={d} className={i>4?"weekend-label":""}>{d}</span>)}</div><div className="calendar-cells">{Array.from({length:cells},(_,i)=>{
   const day=i-offset+1;if(day<1||day>monthDays(month))return <div className="day-cell blank" key={i}/>;
   const date=dateKey(month,day),rank=preferred.indexOf(day),availableRank=available.indexOf(day),isExtra=availableRank>=0,holiday=holidays[date],shift=shifts.find(s=>s.date===date),disabled=stage===2&&rank>=0,weekday=new Date(date+"T12:00:00Z").getUTCDay();
-  const cls=`day-cell ${weekday===0||weekday===6?"weekend":""} ${holiday?"holiday":""} ${rank>=0?"preferred":""} ${isExtra?"available":""} ${shift&&meId&&shift.user_id===meId?"my-shift":""} ${onSelect?"interactive":""} ${!onSelect&&!shift?"unassigned":""} ${shift?"assigned":""} ${showUncovered&&!shift?"uncovered":""}`;
+  const cls=`day-cell ${weekday===0||weekday===6?"weekend":""} ${holiday?"holiday":""} ${rank>=0?"preferred":""} ${isExtra?"available":""} ${shift&&meId&&shift.user_id===meId?"my-shift":""} ${onSelect?"interactive":""} ${!onSelect&&!shift?"unassigned":""} ${shift?"assigned":""} ${showUncovered&&!shift?"uncovered":""} ${highlightedDay===day?"animation-day-active":""}`;
   const children=<><div className="day-top"><span>{day}</span>{onSelect&&rank>=0&&<span className="preference-rank">{rank+1}</span>}{onSelect&&isExtra&&<span className="preference-rank availability-rank">{availableRank+1}</span>}</div>{shift&&<span className="shift-name">{calendarDoctorName(name?.(shift.user_id)??"Medic")}</span>}</>;
   const accessible=`${dateLabel(date)}${holiday?`, ${holiday}`:""}${onSelect?(rank>=0?`, preferința ${rank+1}`:isExtra?`, disponibilitate ${availableRank+1}`:", nealeasă"):`: ${shift?name?.(shift.user_id):"neacoperit"}`}`;
   return onSelect?<button key={date} type="button" className={cls} disabled={disabled} aria-pressed={rank>=0||isExtra} aria-label={accessible} title={holiday||undefined} onClick={()=>onSelect(day)}>{children}</button>:<button key={date} type="button" className={cls} disabled={!onShift} onClick={()=>onShift?.(day)} aria-label={accessible} title={holiday||undefined}>{children}</button>;
  })}</div></div>;
+}
+function AllocationAnimation({month,data}:{month:string;data:Data}){
+ const [snapshot,setSnapshot]=useState<MonthAnimation|null>(null),[cursor,setCursor]=useState(0),[playing,setPlaying]=useState(false),[speed,setSpeed]=useState("1"),[refreshKey,setRefreshKey]=useState(0),[loading,setLoading]=useState(true),[error,setError]=useState("");
+ const userId=data.me!.id;
+ useEffect(()=>{
+  const controller=new AbortController();setLoading(true);setPlaying(false);setError("");
+  void fetch(`/api/garda?view=animation&month=${encodeURIComponent(month)}`,{cache:"no-store",signal:controller.signal}).then(async response=>{
+   const result=await response.json() as MonthAnimation&{error?:string};if(!response.ok)throw new Error(result.error??"Animația nu a putut fi încărcată.");
+   if(!controller.signal.aborted){setSnapshot(result);setCursor(0);}
+  }).catch(e=>{if(!controller.signal.aborted)setError((e as Error).message);}).finally(()=>{if(!controller.signal.aborted)setLoading(false);});
+  return()=>controller.abort();
+ },[month,userId,refreshKey]);
+ const steps=snapshot?.animation.steps??[],last=Math.max(0,steps.length-1),step=steps[cursor];
+ useEffect(()=>{if(!playing||!steps.length)return;if(cursor>=last){setPlaying(false);return;}const timer=setTimeout(()=>setCursor(index=>Math.min(last,index+1)),1500/Number(speed));return()=>clearTimeout(timer);},[playing,cursor,last,speed,steps.length]);
+ const seek=(index:number)=>{setPlaying(false);setCursor(Math.max(0,Math.min(last,index)));};
+ const names=new Map([...data.users.map(u=>[u.id,u.name] as const),...(snapshot?.animation.participants??[]).map(p=>[p.id,p.name] as const)]),name=(id:string)=>names.get(id)??"Medic";
+ const participants=new Map((snapshot?.animation.participants??[]).map(p=>[p.id,p])),doctor=step?.doctorId?participants.get(step.doctorId):undefined;
+ const shifts:Shift[]=(step?.allocations??[]).map(s=>({...s,month,completed:0}));
+ const kindLabels={start:"Ordinea inițială",round:"Rundă nouă",assigned:"Gardă atribuită",skipped:"Alegere sărită",finish:snapshot?.animation.mode==="live"?"Rezultatul Live":"Rezultatul salvat"};
+ const changed=!!snapshot&&snapshot.version!==(data.months.find(m=>m.id===month)?.version??0);
+ const choiceList=(days:number[],stage:"preferred"|"available")=><div className={`animation-choices ${stage}`}>{days.length?days.map((day,index)=><span key={day} className={step?.stage===stage&&step.rank===index+1&&step.doctorId===doctor?.id?"current":""}><small>{index+1}</small>{day}</span>):<small>Nicio zi aleasă</small>}</div>;
+ return <div className="allocation-animation">
+  <div className="animation-heading"><div><h1>Animație</h1><p className="capitalize">{monthTitle(month)} · doar pentru administrator</p></div><button type="button" className="btn secondary small-btn" disabled={loading} onClick={()=>setRefreshKey(key=>key+1)}><RefreshCw size={16} className={loading?"spin":""}/>Actualizează</button></div>
+  {error&&<div className="alert error"><AlertCircle size={18}/>{error}</div>}
+  {changed&&<p className="animation-update-note">Înscrierile s-au modificat. Apasă „Actualizează” pentru repartizarea Live cea mai recentă.</p>}
+  {!snapshot?<div className="panel"><p className="muted">{loading?"Se pregătesc pașii repartizării…":"Apasă „Actualizează” pentru a încărca animația."}</p></div>:<>
+   <section className="panel animation-player" aria-label="Redarea pașilor repartizării">
+    <div className="animation-controls"><button type="button" className="btn primary small-btn" disabled={loading||steps.length<2} onClick={()=>{if(cursor===last)setCursor(0);setPlaying(value=>!value);}}>{playing?<Pause size={17}/>:<Play size={17}/>} {playing?"Pauză":"Redă"}</button><button type="button" className="icon-btn" title="De la început" aria-label="De la început" disabled={loading||cursor===0} onClick={()=>seek(0)}><SkipBack size={18}/></button><button type="button" className="icon-btn" title="Pasul precedent" aria-label="Pasul precedent" disabled={loading||cursor===0} onClick={()=>seek(cursor-1)}><ChevronLeft size={20}/></button><button type="button" className="icon-btn" title="Pasul următor" aria-label="Pasul următor" disabled={loading||cursor===last} onClick={()=>seek(cursor+1)}><ChevronRight size={20}/></button><button type="button" className="icon-btn" title="Rezultatul Live" aria-label="Ultimul pas" disabled={loading||cursor===last} onClick={()=>seek(last)}><SkipForward size={18}/></button><label className="animation-speed">Viteză<select aria-label="Viteza animației" value={speed} onChange={event=>setSpeed(event.target.value)}><option value="0.5">0,5×</option><option value="1">1×</option><option value="2">2×</option><option value="3">3×</option></select></label></div>
+    <label className="animation-timeline" htmlFor="allocation-step"><span>Pasul {cursor} din {last}</span><span>{step&&kindLabels[step.kind]}{step?.rank?` · ${step.stage==="preferred"?"preferința":"disponibilitatea"} ${step.rank}`:""}</span></label>
+    <input id="allocation-step" className="animation-slider" type="range" min={0} max={last} step={1} value={cursor} disabled={loading||!last} aria-label="Pasul repartizării" aria-valuetext={`Pasul ${cursor} din ${last}: ${step?.explanation??""}`} onChange={event=>seek(Number(event.target.value))}/>
+    <div className={`animation-explanation ${step?.kind??""}`} key={cursor} role="status"><p>{step?.explanation}</p></div>
+   </section>
+   <div className="animation-layout"><section className="panel animation-calendar"><h2 className="capitalize">{monthTitle(month)}</h2><CalendarGrid month={month} holidays={snapshot.holidays} holidayPoints={snapshot.holidayPoints} shifts={shifts} name={name} highlightedDay={step?.day}/><div className="coverage-summary"><span>Zile acoperite <strong>{shifts.length}</strong></span><span>Neacoperite <strong>{monthDays(month)-shifts.length}</strong></span></div></section>
+    <aside className="animation-sidebar">{snapshot.animation.mode==="live"&&<section className="panel animation-queue"><h2>Ordinea la acest pas</h2><ol>{(step?.queue??[]).map((id,index)=>{const p=participants.get(id),assigned=shifts.filter(s=>s.user_id===id).length;return <li key={id} className={id===step?.doctorId?"current":""}><span className="animation-position">{index+1}</span><strong>{calendarDoctorName(name(id))}</strong><span className="animation-queue-score">{p?.points??0} P</span><small>{assigned}/{p?.preferred.length??0}</small></li>;})}</ol><p className="muted">Gărzi atribuite / solicitate. Punctajele rămân neschimbate în simulare.</p></section>}
+     {doctor&&<section className="panel animation-doctor"><h2>{doctor.name}</h2><h3>Preferințe, în ordine</h3>{choiceList(doctor.preferred,"preferred")}<h3>Disponibilitate, în ordine</h3>{choiceList(doctor.available,"available")}</section>}
+    </aside>
+   </div>
+   <details className="panel animation-inputs"><summary>Alegerile tuturor medicilor</summary><div className="animation-input-list">{snapshot.animation.participants.map(p=><article key={p.id}><h3>{p.name} <small>{p.points} P</small></h3><p>Preferințe: {p.preferred.map((day,index)=>`${index+1} → ${day}`).join(" · ")||"Nicio zi"}</p><p>Disponibilitate: {p.available.map((day,index)=>`${index+1} → ${day}`).join(" · ")||"Nicio zi"}</p></article>)}</div></details>
+   <p className="animation-snapshot-note">{snapshot.animation.mode==="live"?"Repartizare Live":"Program salvat"} la {new Date(snapshot.generatedAt).toLocaleString("ro-RO",{timeZone:"Europe/Bucharest"})}. {snapshot.status==="open"?"Înscrierile rămân deschise.":statuses[snapshot.status]}</p>
+  </>}
+ </div>;
 }
 function Selection({month,data,busy,save}:{month:string;data:Data;busy:boolean;save:(p:number[],a:number[])=>Promise<unknown>}){
  const stored=data.submissions.find(s=>s.month===month&&s.user_id===data.me!.id);const [preferred,setPreferred]=useState<number[]>(stored?.preferred??[]),[available,setAvailable]=useState<number[]>(stored?.available??[]),[stage,setStage]=useState(1),[saved,setSaved]=useState(false),[error,setError]=useState("");
