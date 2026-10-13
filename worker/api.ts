@@ -28,6 +28,12 @@ async function mutation(m:Month,status:string,statements:(op:string)=>D1Prepared
 
 export async function GET(request:Request){try{
  const user=await currentUser(request),setupComplete=await setupDone(),emailReady=!!(runtime("RESEND_API_KEY")&&runtime("MAIL_FROM"));
+ if(new URL(request.url).searchParams.get("view")==="animation"){
+  if(!user)fail("Autentifică-te pentru a vedea animația.",401);
+  if(!user.active||!isAdmin(user))fail("Animația este disponibilă doar administratorului.",403);
+  const month=monthSchema.parse(new URL(request.url).searchParams.get("month"));
+  return json(await getMonthPreview(month,user.id,true));
+ }
  if(new URL(request.url).searchParams.get("view")==="preview"){
   if(!user)fail("Autentifică-te pentru a vedea programul.",401);
   if(!user.active)fail("Contul nu are acces la program.",403);
