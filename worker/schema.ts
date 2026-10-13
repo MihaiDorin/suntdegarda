@@ -1,6 +1,6 @@
 import { db } from "@/lib/server";
 import { initializeTeam } from "./accounts";
-import { initializeRulesHistory, runMonthlyLifecycle } from "./planning";
+import { initializeRulesHistory, initializeFinalizationPoints, runMonthlyLifecycle } from "./planning";
 
 const statements: string[] = [
   "CREATE TABLE IF NOT EXISTS `audit` (\n\t`id` text PRIMARY KEY NOT NULL,\n\t`user_id` text NOT NULL,\n\t`action` text NOT NULL,\n\t`created` text NOT NULL\n);",
@@ -23,6 +23,8 @@ const statements: string[] = [
   "CREATE INDEX IF NOT EXISTS `swaps_recipient` ON `swaps` (`recipient`);",
   "CREATE TABLE IF NOT EXISTS `users` (\n\t`id` text PRIMARY KEY NOT NULL,\n\t`email` text NOT NULL,\n\t`name` text NOT NULL,\n\t`password` text NOT NULL,\n\t`role` text DEFAULT 'doctor' NOT NULL,\n\t`active` integer DEFAULT 0 NOT NULL,\n\t`base_points` integer DEFAULT 0 NOT NULL,\n\t`created` text NOT NULL\n);",
   "CREATE UNIQUE INDEX IF NOT EXISTS `users_email_unique` ON `users` (`email`);",
+  "CREATE TABLE IF NOT EXISTS shift_credits(date TEXT PRIMARY KEY NOT NULL,month TEXT NOT NULL,user_id TEXT NOT NULL,points INTEGER NOT NULL,created TEXT NOT NULL,FOREIGN KEY(month) REFERENCES months(id),FOREIGN KEY(user_id) REFERENCES users(id))",
+  "CREATE INDEX IF NOT EXISTS shift_credits_user ON shift_credits(user_id)",
   "CREATE TABLE IF NOT EXISTS push_subscriptions (id TEXT PRIMARY KEY NOT NULL,user_id TEXT NOT NULL,endpoint TEXT NOT NULL,p256dh TEXT NOT NULL,auth TEXT NOT NULL,created TEXT NOT NULL,FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE)",
   "CREATE INDEX IF NOT EXISTS push_subscriptions_user ON push_subscriptions(user_id)",
   "CREATE TABLE IF NOT EXISTS push_deliveries (id TEXT PRIMARY KEY NOT NULL,notification_id TEXT NOT NULL,subscription_id TEXT NOT NULL,created TEXT NOT NULL,done INTEGER NOT NULL DEFAULT 0,attempts INTEGER NOT NULL DEFAULT 0,retry_at INTEGER NOT NULL DEFAULT 0,claim TEXT,FOREIGN KEY(notification_id) REFERENCES notifications(id) ON DELETE CASCADE,FOREIGN KEY(subscription_id) REFERENCES push_subscriptions(id) ON DELETE CASCADE)",
@@ -37,6 +39,7 @@ export function ensureSchema(): Promise<void> {
     .then(async existing => { const names=new Set(existing.results.map(row=>String(row.name)));const missing=statements.filter(sql=>{const name=sql.match(/CREATE (?:UNIQUE )?(?:TABLE|INDEX|TRIGGER) IF NOT EXISTS\s+[\x60\"']?([A-Za-z0-9_]+)/i)?.[1];return !name||!names.has(name);});if(missing.length)await db().batch(missing.map(sql=>db().prepare(sql))); })
     .then(() => initializeTeam())
     .then(() => initializeRulesHistory())
+    .then(() => initializeFinalizationPoints())
     .then(() => runMonthlyLifecycle())
     .catch(error => { ready = undefined; throw error; });
   return ready;

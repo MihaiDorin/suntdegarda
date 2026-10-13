@@ -6,8 +6,19 @@ import { dateKey, dayPoints, holidayMap, holidayScoreMap, isWeekend, monthDays, 
 import { bucharestTimestamp, registrationDates, registrationStage } from "@/lib/rules";
 
 export type PlanningMonth={id:string;status:string;version:number;deadline:string|null;report:string};
-export type ScoredUser=Omit<User,"password">&{points:number;registered:number};
-export async function scoredUsers(){return (await db().prepare("SELECT u.id,u.name,u.email,u.role,u.active,u.listed,CASE WHEN u.password<>'' THEN 1 ELSE 0 END AS registered,u.base_points,u.created,u.base_points+COALESCE((SELECT SUM(s.points) FROM shifts s WHERE s.user_id=u.id AND s.completed=1),0)+COALESCE((SELECT SUM(a.points) FROM point_adjustments a WHERE a.user_id=u.id),0) AS points FROM users u ORDER BY points DESC,u.name COLLATE NOCASE").all()).results as ScoredUser[];}
+export type ScoredUser=Omit<User,"password">&{points:number;registered:number;credited_shifts:number};
+export async function scoredUsers(year?:number){
+ const filter=year===undefined?"":" AND c.month LIKE ?";
+ const query=db().prepare("SELECT u.id,u.name,u.email,u.role,u.active,u.listed,CASE WHEN u.password<>'' THEN 1 ELSE 0 END AS registered,u.base_points,u.created,u.base_points+COALESCE((SELECT SUM(c.points) FROM shift_credits c WHERE c.user_id=u.id),0)+COALESCE((SELECT SUM(a.points) FROM point_adjustments a WHERE a.user_id=u.id),0) AS points,(SELECT COUNT(*) FROM shift_credits c WHERE c.user_id=u.id"+filter+") AS credited_shifts FROM users u ORDER BY points DESC,u.name COLLATE NOCASE");
+ return (await (year===undefined?query:query.bind(year+"-%")).all()).results as ScoredUser[];
+}
+// A credit belongs to the doctor at finalization, independently of later swaps.
+export function finalizationCredits(month:string,mutation:string,created=now()){
+ return db().prepare("INSERT OR IGNORE INTO shift_credits(date,month,user_id,points,created) SELECT s.date,s.month,s.user_id,s.points,? FROM shifts s WHERE s.month=? AND EXISTS(SELECT 1 FROM months m WHERE m.id=? AND m.mutation=? AND m.status='published')").bind(created,month,month,mutation);
+}
+export async function initializeFinalizationPoints(){
+ await db().prepare("INSERT OR IGNORE INTO shift_credits(date,month,user_id,points,created) SELECT s.date,s.month,s.user_id,s.points,? FROM shifts s JOIN months m ON m.id=s.month WHERE s.completed=1 OR m.status IN ('published','completed')").bind(now()).run();
+}
 export async function holidayCalendar(year:number){
  const overrides=(await db().prepare("SELECT h.date,h.label,h.enabled,p.points FROM holidays h LEFT JOIN holiday_points p ON p.date=h.date WHERE h.date LIKE ?").bind(year+"-%").all()).results as {date:string;label:string;enabled:number;points:number}[];
  const holidays=holidayMap(year,overrides);return {holidays,holidayPoints:holidayScoreMap(year,holidays,overrides)};
@@ -68,6 +79,7 @@ export async function transitionPlanning(month:PlanningMonth,status:string,resul
  const op=uuid(),created=now(),guard="EXISTS(SELECT 1 FROM months WHERE id=? AND mutation=?)";
  const statements=[db().prepare("UPDATE months SET status=?,deadline=?,version=version+1,mutation=? WHERE id=? AND version=? AND status NOT IN ('published','completed')").bind(status,deadline,op,month.id,month.version)];
  if(result){statements.push(db().prepare("DELETE FROM shifts WHERE month=? AND "+guard).bind(month.id,month.id,op));statements.push(db().prepare("INSERT INTO shifts(date,month,user_id,points,reason,completed) SELECT json_extract(j.value,'$.date'),?,json_extract(j.value,'$.user_id'),json_extract(j.value,'$.points'),json_extract(j.value,'$.reason'),0 FROM json_each(?) j WHERE "+guard).bind(month.id,JSON.stringify(result.allocations),month.id,op));statements.push(db().prepare("UPDATE months SET report=? WHERE id=? AND mutation=?").bind(JSON.stringify(result.report),month.id,op));}
+ if(status==="published")statements.push(finalizationCredits(month.id,op,created));
  if(message)statements.push(db().prepare("INSERT INTO notifications(id,user_id,message,read,created) SELECT lower(hex(randomblob(16))),u.id,?,0,? FROM users u WHERE u.active=1 AND u.listed=1 AND u.password<>'' AND "+guard).bind(message,created,month.id,op));
  statements.push(db().prepare("INSERT INTO audit(id,user_id,action,created) SELECT ?,u.id,?,? FROM users u WHERE u.email=? AND u.role='admin' AND "+guard).bind(uuid(),"Etapă program: "+month.id+" → "+status,created,ADMIN_EMAIL,month.id,op));
  const applied=await db().batch(statements);return !!applied[0].meta.changes;
