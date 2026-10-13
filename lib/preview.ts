@@ -4,7 +4,7 @@ import { dateKey,monthDays,holidayMap,holidayScoreMap,isWeekend,shiftDate,shiftM
 
 type PreviewUser={id:string;name:string;active:number;listed:number;points:number};
 type PreviewSubmission={user_id:string;preferred:string;available:string};
-type PreviewShift={date:string;month:string;user_id:string;points:number;reason:string;completed:number};
+type PreviewShift={date:string;month:string;user_id:string;points:number;reason:string;completed:number;credited?:number};
 export type MonthPreview={
  month:string;status:string;source:"simulation"|"saved"|"final"|"empty";version:number;generatedAt:string;
  holidays:Record<string,string>;holidayPoints:Record<string,number>;shifts:PreviewShift[];
@@ -12,14 +12,14 @@ export type MonthPreview={
  stats:{days:number;covered:number;requested:number;submitted:number;activeDoctors:number;preferredHonored:number;missingSubmissions:string[];weekendFree:number};
  doctors:{id:string;name:string;requested:number;assigned:number;preferredHonored:number;weekday:number;weekend:number;holiday:number;currentPoints:number;monthPoints:number;projectedPoints:number}[];
 };
-const scoreSQL="SELECT u.id,u.name,u.active,u.listed,u.base_points+COALESCE((SELECT SUM(s.points) FROM shifts s WHERE s.user_id=u.id AND s.completed=1),0)+COALESCE((SELECT SUM(a.points) FROM point_adjustments a WHERE a.user_id=u.id),0) AS points FROM users u ORDER BY points DESC,u.name COLLATE NOCASE";
+const scoreSQL="SELECT u.id,u.name,u.active,u.listed,u.base_points+COALESCE((SELECT SUM(c.points) FROM shift_credits c WHERE c.user_id=u.id),0)+COALESCE((SELECT SUM(a.points) FROM point_adjustments a WHERE a.user_id=u.id),0) AS points FROM users u ORDER BY points DESC,u.name COLLATE NOCASE";
 export async function getMonthPreview(month:string,userId?:string):Promise<MonthPreview>{
  // One read-only batch keeps the month, submissions, scores and overrides in a consistent snapshot.
  const results=await db().batch([
   db().prepare("SELECT id,status,version,report FROM months WHERE id=?").bind(month),
   db().prepare(scoreSQL),
   db().prepare("SELECT user_id,preferred,available FROM submissions WHERE month=?").bind(month),
-  db().prepare("SELECT date,month,user_id,points,reason,completed FROM shifts WHERE month=? ORDER BY date").bind(month),
+  db().prepare("SELECT s.date,s.month,s.user_id,s.points,s.reason,s.completed,EXISTS(SELECT 1 FROM shift_credits c WHERE c.date=s.date) AS credited FROM shifts s WHERE s.month=? ORDER BY s.date").bind(month),
   db().prepare("SELECT h.date,h.label,h.enabled,p.points FROM holidays h LEFT JOIN holiday_points p ON p.date=h.date WHERE h.date LIKE ?").bind(`${month.slice(0,4)}-%`),
   db().prepare("SELECT date,user_id FROM shifts WHERE date IN (?,?)").bind(shiftDate(month+"-01",-1),shiftMonth(month,1)+"-01"),
   db().prepare("SELECT date,user_id FROM shift_refusals WHERE date LIKE ?").bind(month+"-%")
@@ -39,7 +39,7 @@ export async function getMonthPreview(month:string,userId?:string):Promise<Month
   const sub=submissions.find(s=>s.user_id===u.id),own=shifts.filter(s=>s.user_id===u.id);
   return {id:u.id,name:u.name,requested:sub?.preferred.length??0,assigned:own.length,preferredHonored:own.filter(s=>sub?.preferred.includes(Number(s.date.slice(8)))).length,
    weekday:own.filter(s=>s.points===1).length,weekend:own.filter(s=>s.points===3).length,holiday:own.filter(s=>s.points>=5).length,
-   currentPoints:u.points,monthPoints:own.reduce((n,s)=>n+s.points,0),projectedPoints:u.points+own.filter(s=>!s.completed).reduce((n,s)=>n+s.points,0)};
+   currentPoints:u.points,monthPoints:own.reduce((n,s)=>n+s.points,0),projectedPoints:u.points+own.filter(s=>!s.credited).reduce((n,s)=>n+s.points,0)};
  }).sort((a,b)=>b.currentPoints-a.currentPoints||a.name.localeCompare(b.name,"ro"));
  const uncovered=Array.from({length:monthDays(month)},(_,i)=>i+1).filter(d=>!shifts.some(s=>s.date===dateKey(month,d)));
  return {month,status,source,version:m?.version??0,generatedAt:now(),holidays,holidayPoints,shifts,

@@ -8,7 +8,7 @@ import { getMonthPreview } from "@/lib/preview";
 import { monthDays,monthTitle,dateKey,dateLabel,holidayMap,dayPoints,validateSelection,todayRO,dutyDateRO } from "@/lib/calendar";
 import { isWeekend } from "@/lib/calendar";
 import { registrationStage, registrationDates, bucharestTimestamp } from "@/lib/rules";
-import { scoredUsers, holidayCalendar, buildAllocation, assertNoConsecutive, assertProgramSpacing, weekendAvailable, transitionPlanning, refuseAssignedShift } from "./planning";
+import { scoredUsers, finalizationCredits, holidayCalendar, buildAllocation, assertNoConsecutive, assertProgramSpacing, weekendAvailable, transitionPlanning, refuseAssignedShift } from "./planning";
 type Month={id:string;status:string;version:number;deadline:string|null;report:string};
 type Submission={user_id:string;month:string;preferred:string;available:string};
 type Shift={date:string;month:string;user_id:string;points:number;completed:number;reason:string};
@@ -20,11 +20,11 @@ const passwordSchema=z.string().min(10,"Parola trebuie să aibă minimum 10 cara
 const credentials=z.object({doctor_id:z.string().min(1),email:emailSchema,password:passwordSchema});
 const json=(value:unknown,status=200,headers:Record<string,string>={})=>Response.json(value,{status,headers:{"Cache-Control":"no-store","X-Content-Type-Options":"nosniff",...headers}});
 const parseJSON=(s:string,fallback:unknown)=>{try{return JSON.parse(s);}catch{return fallback;}};
-async function pointsUsers(){return scoredUsers();}
+async function pointsUsers(year?:number){return scoredUsers(year);}
 async function holidaysFor(year:number){return (await holidayCalendar(year)).holidays;}
 async function getMonth(id:string){const m=await db().prepare("SELECT * FROM months WHERE id=?").bind(id).first<Month>();if(!m)fail("Luna nu a fost deschisă încă.");return m;}
 function guard(m:Month,version:number){if(m.version!==version)fail("Datele au fost actualizate de altcineva. Reîncarcă și încearcă din nou.",409);}
-async function mutation(m:Month,status:string,statements:(op:string)=>D1PreparedStatement[],actor:User,action:string){const op=uuid();const results=await db().batch([db().prepare("UPDATE months SET status=?,version=version+1,mutation=? WHERE id=? AND version=?").bind(status,op,m.id,m.version),...statements(op),db().prepare("INSERT INTO audit (id,user_id,action,created) SELECT ?,?,?,? WHERE EXISTS (SELECT 1 FROM months WHERE id=? AND mutation=?)").bind(uuid(),actor.id,action,now(),m.id,op)]);if(!results[0].meta.changes)fail("Luna a fost actualizată între timp. Reîncarcă datele.",409);}
+async function mutation(m:Month,status:string,statements:(op:string)=>D1PreparedStatement[],actor:User,action:string){const op=uuid();const results=await db().batch([db().prepare("UPDATE months SET status=?,version=version+1,mutation=? WHERE id=? AND version=?").bind(status,op,m.id,m.version),...statements(op),...(status==="published"?[finalizationCredits(m.id,op)]:[]),db().prepare("INSERT INTO audit (id,user_id,action,created) SELECT ?,?,?,? WHERE EXISTS (SELECT 1 FROM months WHERE id=? AND mutation=?)").bind(uuid(),actor.id,action,now(),m.id,op)]);if(!results[0].meta.changes)fail("Luna a fost actualizată între timp. Reîncarcă datele.",409);}
 
 export async function GET(request:Request){try{
  const user=await currentUser(request),setupComplete=await setupDone(),emailReady=!!(runtime("RESEND_API_KEY")&&runtime("MAIL_FROM"));
@@ -41,7 +41,7 @@ export async function GET(request:Request){try{
  const year=z.coerce.number().int().min(2020).max(2099).parse(new URL(request.url).searchParams.get("year")??todayRO().slice(0,4));
  const admin=isAdmin(user);
  const results=await Promise.all([
-  pointsUsers(),db().prepare("SELECT id,status,deadline,version,report FROM months WHERE id LIKE ? ORDER BY id").bind(`${year}-%`).all(),
+  pointsUsers(year),db().prepare("SELECT id,status,deadline,version,report FROM months WHERE id LIKE ? ORDER BY id").bind(`${year}-%`).all(),
   db().prepare(`SELECT * FROM submissions WHERE month LIKE ? ${admin?"":"AND user_id=?"}`).bind(`${year}-%`,...(!admin?[user.id]:[])).all(),
   db().prepare(`SELECT s.* FROM shifts s JOIN months m ON m.id=s.month WHERE s.month LIKE ? ${admin?"":"AND m.status IN ('filling','draft','published','completed')"} ORDER BY s.date`).bind(`${year}-%`).all(),
   db().prepare("SELECT * FROM swaps WHERE requester=? OR recipient=? ORDER BY created DESC LIMIT 100").bind(user.id,user.id).all(),
@@ -52,7 +52,7 @@ export async function GET(request:Request){try{
   holidayCalendar(year)
  ]);
  const [users,months,submissions,shifts,swaps,notifications,holidays,futureShifts,events,suggestion,calendar]=results;
- return json({me:safeUser(user),setupComplete,emailReady,doctors:await publicDoctors(),accountResetPending:admin&&!await db().prepare("SELECT value FROM settings WHERE key='accounts_reset_v2'").first(),suggestedMonth:suggestion?.id??null,users:users.map(u=>({id:u.id,name:u.name,role:isAdmin(u)?"admin":"doctor",active:u.active,listed:u.listed,registered:u.registered,points:u.points,base_points:u.base_points,...(admin?{email:u.registered?u.email:undefined}:{})})),months:months.results.map(m=>({...m,report:admin?parseJSON(String(m.report),{}):{}})),submissions:submissions.results.map(s=>({...s,preferred:parseJSON(String(s.preferred),[]),available:parseJSON(String(s.available),[])})),shifts:shifts.results,swaps:swaps.results,notifications:notifications.results,holidays,holidayPoints:calendar.holidayPoints,futureShifts:futureShifts.results,events:events.results,today:todayRO(),dutyDate:dutyDateRO()});
+ return json({me:safeUser(user),setupComplete,emailReady,doctors:await publicDoctors(),accountResetPending:admin&&!await db().prepare("SELECT value FROM settings WHERE key='accounts_reset_v2'").first(),suggestedMonth:suggestion?.id??null,users:users.map(u=>({id:u.id,name:u.name,role:isAdmin(u)?"admin":"doctor",active:u.active,listed:u.listed,registered:u.registered,points:u.points,base_points:u.base_points,credited_shifts:u.credited_shifts,...(admin?{email:u.registered?u.email:undefined}:{})})),months:months.results.map(m=>({...m,report:admin?parseJSON(String(m.report),{}):{}})),submissions:submissions.results.map(s=>({...s,preferred:parseJSON(String(s.preferred),[]),available:parseJSON(String(s.available),[])})),shifts:shifts.results,swaps:swaps.results,notifications:notifications.results,holidays,holidayPoints:calendar.holidayPoints,futureShifts:futureShifts.results,events:events.results,today:todayRO(),dutyDate:dutyDateRO()});
  }catch(error){return onError(error);}}
 
 export async function POST(request:Request){try{
@@ -222,7 +222,7 @@ export async function POST(request:Request){try{
   await mutation(m,"published",()=>[],user,`Program definitivat: ${c.month}`);await broadcastNotification(`Programul pentru ${monthTitle(c.month)} a fost definitivat.`).run();return json({ok:true});
  }
  if(action==="complete"){
-  if(m.status!=="published")fail("Punctele se acordă doar pentru un program definitiv.");if(dateKey(c.month,monthDays(c.month))>=todayRO())fail("Poți confirma gărzile efectuate după încheierea lunii.");
+  if(m.status!=="published")fail("Poți confirma efectuarea doar pentru un program definitiv.");if(dateKey(c.month,monthDays(c.month))>=todayRO())fail("Poți confirma gărzile efectuate după încheierea lunii.");
   await mutation(m,"completed",op=>[db().prepare("UPDATE shifts SET completed=1 WHERE month=? AND EXISTS(SELECT 1 FROM months WHERE id=? AND mutation=?)").bind(c.month,c.month,op)],user,`Gărzi efectuate confirmate: ${c.month}`);return json({ok:true});
  }
  fail("Acțiune necunoscută.");
