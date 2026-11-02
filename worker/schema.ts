@@ -3,6 +3,7 @@ import { initializeTeam } from "./accounts";
 import { initializeRulesHistory, initializeFinalizationPoints, runMonthlyLifecycle } from "./planning";
 
 const statements: string[] = [
+  "CREATE TABLE IF NOT EXISTS registration_controls(month TEXT PRIMARY KEY NOT NULL,mode TEXT NOT NULL CHECK(mode IN ('auto','open','closed')),updated TEXT NOT NULL,FOREIGN KEY(month) REFERENCES months(id))",
   "CREATE TABLE IF NOT EXISTS `audit` (\n\t`id` text PRIMARY KEY NOT NULL,\n\t`user_id` text NOT NULL,\n\t`action` text NOT NULL,\n\t`created` text NOT NULL\n);",
   "CREATE TABLE IF NOT EXISTS `holidays` (\n\t`date` text PRIMARY KEY NOT NULL,\n\t`label` text NOT NULL,\n\t`enabled` integer DEFAULT 1 NOT NULL\n);",
   "CREATE TABLE IF NOT EXISTS `limits` (\n\t`id` text PRIMARY KEY NOT NULL,\n\t`count` integer NOT NULL,\n\t`expires` integer NOT NULL\n);",

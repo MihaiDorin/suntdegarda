@@ -5,7 +5,7 @@ import { allocate, type Allocation, type Participant } from "@/lib/scheduler";
 import { dateKey, dayPoints, holidayMap, holidayScoreMap, isWeekend, monthDays, monthTitle, shiftDate, shiftMonth, todayRO } from "@/lib/calendar";
 import { bucharestTimestamp, registrationDates, registrationStage } from "@/lib/rules";
 
-export type PlanningMonth={id:string;status:string;version:number;deadline:string|null;report:string};
+export type PlanningMonth={id:string;status:string;version:number;deadline:string|null;report:string;registration_mode?:string};
 export type ScoredUser=Omit<User,"password">&{points:number;registered:number;credited_shifts:number};
 export async function scoredUsers(year?:number){
  const filter=year===undefined?"":" AND c.month LIKE ?";
@@ -84,12 +84,14 @@ export async function transitionPlanning(month:PlanningMonth,status:string,resul
  statements.push(db().prepare("INSERT INTO audit(id,user_id,action,created) SELECT ?,u.id,?,? FROM users u WHERE u.email=? AND u.role='admin' AND "+guard).bind(uuid(),"Etapă program: "+month.id+" → "+status,created,ADMIN_EMAIL,month.id,op));
  const applied=await db().batch(statements);return !!applied[0].meta.changes;
 }
-export async function runMonthlyLifecycle(){
+export async function runMonthlyLifecycle(time=new Date()){
  const today=todayRO(),next=shiftMonth(today.slice(0,7),1);
- await db().prepare("INSERT OR IGNORE INTO months(id,status,version,report) VALUES(?,'locked',0,'{}')").bind(next).run();
- const months=(await db().prepare("SELECT id,status,version,deadline,report FROM months WHERE id>=? AND status NOT IN ('published','completed') ORDER BY id").bind(today.slice(0,7)).all()).results as PlanningMonth[];
+ await db().batch([0,1,2].map(offset=>db().prepare("INSERT OR IGNORE INTO months(id,status,version,report) VALUES(?,'locked',0,'{}')").bind(shiftMonth(next,offset))));
+ const months=(await db().prepare("SELECT m.id,m.status,m.version,m.deadline,m.report,COALESCE(c.mode,CASE WHEN m.status='closed' THEN 'closed' ELSE 'auto' END) AS registration_mode FROM months m LEFT JOIN registration_controls c ON c.month=m.id WHERE m.id>=? AND m.status NOT IN ('published','completed') ORDER BY m.id").bind(today.slice(0,7)).all()).results as PlanningMonth[];
  for(let m of months){
-  const stage=registrationStage(m.id,today),dates=registrationDates(m.id);
+  const stage=registrationStage(m.id,time),dates=registrationDates(m.id);
+  if((stage==="early"||stage==="open")&&m.registration_mode==="closed")continue;
+  if(stage==="early"&&m.registration_mode==="open")continue;
   if(stage==="early"){if(m.status==="open")await transitionPlanning(m,"locked",null,"");continue;}
   if(stage==="open"){const deadline=bucharestTimestamp(dates.close);if(m.status==="locked")await transitionPlanning(m,"open",null,"S-au deschis înscrierile pentru "+monthTitle(m.id)+".",deadline);else if(m.status==="open"&&m.deadline!==deadline)await db().prepare("UPDATE months SET deadline=? WHERE id=? AND version=? AND status='open'").bind(deadline,m.id,m.version).run();continue;}
   if(["open","closed","locked"].includes(m.status)){

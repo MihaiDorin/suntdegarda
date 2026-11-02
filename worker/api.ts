@@ -1,15 +1,16 @@
 import { z } from "zod";
 import { db,runtime,uuid,now,digest,hashPassword,passwordOK,currentUser,session,cookie,fail,AppError,rateLimit,notification,broadcastNotification,audit,safeUser,randomToken,isAdmin,type User } from "@/lib/server";
 import { pushAction,removePushDevice } from "./push";
+import { mailStatus,saveMailConfig,sendPasswordReset } from "./mail";
 import { ADMIN_EMAIL,normalizeDoctorName,unclaimedEmail } from "@/lib/team";
 import { setupComplete as setupDone,publicDoctors,validSetupToken,resetAccounts } from "./accounts";
 import { allocate,type Participant } from "@/lib/scheduler";
 import { getMonthPreview } from "@/lib/preview";
-import { monthDays,monthTitle,dateKey,dateLabel,holidayMap,dayPoints,validateSelection,todayRO,dutyDateRO } from "@/lib/calendar";
+import { monthDays,monthTitle,dateKey,dateLabel,holidayMap,dayPoints,validateSelection,todayRO,dutyDateRO,shiftMonth } from "@/lib/calendar";
 import { isWeekend } from "@/lib/calendar";
-import { registrationStage, registrationDates, bucharestTimestamp } from "@/lib/rules";
+import { registrationStage, registrationDates, bucharestTimestamp,initialRegistrationOpen } from "@/lib/rules";
 import { scoredUsers, finalizationCredits, holidayCalendar, buildAllocation, assertNoConsecutive, assertProgramSpacing, weekendAvailable, transitionPlanning, refuseAssignedShift } from "./planning";
-type Month={id:string;status:string;version:number;deadline:string|null;report:string};
+type Month={id:string;status:string;version:number;deadline:string|null;report:string;registration_mode?:string};
 type Submission={user_id:string;month:string;preferred:string;available:string};
 type Shift={date:string;month:string;user_id:string;points:number;completed:number;reason:string};
 type Swap={id:string;from_date:string;to_date:string;requester:string;recipient:string;status:string};
@@ -22,12 +23,12 @@ const json=(value:unknown,status=200,headers:Record<string,string>={})=>Response
 const parseJSON=(s:string,fallback:unknown)=>{try{return JSON.parse(s);}catch{return fallback;}};
 async function pointsUsers(year?:number){return scoredUsers(year);}
 async function holidaysFor(year:number){return (await holidayCalendar(year)).holidays;}
-async function getMonth(id:string){const m=await db().prepare("SELECT * FROM months WHERE id=?").bind(id).first<Month>();if(!m)fail("Luna nu a fost deschisă încă.");return m;}
+async function getMonth(id:string){const m=await db().prepare("SELECT m.*,COALESCE(c.mode,'auto') AS registration_mode FROM months m LEFT JOIN registration_controls c ON c.month=m.id WHERE m.id=?").bind(id).first<Month>();if(!m)fail("Luna nu a fost deschisă încă.");return m;}
 function guard(m:Month,version:number){if(m.version!==version)fail("Datele au fost actualizate de altcineva. Reîncarcă și încearcă din nou.",409);}
 async function mutation(m:Month,status:string,statements:(op:string)=>D1PreparedStatement[],actor:User,action:string){const op=uuid();const results=await db().batch([db().prepare("UPDATE months SET status=?,version=version+1,mutation=? WHERE id=? AND version=?").bind(status,op,m.id,m.version),...statements(op),...(status==="published"?[finalizationCredits(m.id,op)]:[]),db().prepare("INSERT INTO audit (id,user_id,action,created) SELECT ?,?,?,? WHERE EXISTS (SELECT 1 FROM months WHERE id=? AND mutation=?)").bind(uuid(),actor.id,action,now(),m.id,op)]);if(!results[0].meta.changes)fail("Luna a fost actualizată între timp. Reîncarcă datele.",409);}
 
 export async function GET(request:Request){try{
- const user=await currentUser(request),setupComplete=await setupDone(),emailReady=!!(runtime("RESEND_API_KEY")&&runtime("MAIL_FROM"));
+ const user=await currentUser(request),setupComplete=await setupDone(),mail=await mailStatus(),emailReady=mail.configured;
  if(new URL(request.url).searchParams.get("view")==="animation"){
   if(!user)fail("Autentifică-te pentru a vedea animația.",401);
   if(!user.active||!isAdmin(user))fail("Animația este disponibilă doar administratorului.",403);
@@ -46,9 +47,10 @@ export async function GET(request:Request){try{
  if(!user.active)return json({me:safeUser(user),setupComplete,emailReady,pending:true});
  const year=z.coerce.number().int().min(2020).max(2099).parse(new URL(request.url).searchParams.get("year")??todayRO().slice(0,4));
  const admin=isAdmin(user);
+ const enrollmentStart=shiftMonth(todayRO().slice(0,7),1),enrollmentEnd=shiftMonth(enrollmentStart,2);
  const results=await Promise.all([
-  pointsUsers(year),db().prepare("SELECT id,status,deadline,version,report FROM months WHERE id LIKE ? ORDER BY id").bind(`${year}-%`).all(),
-  db().prepare(`SELECT * FROM submissions WHERE month LIKE ? ${admin?"":"AND user_id=?"}`).bind(`${year}-%`,...(!admin?[user.id]:[])).all(),
+  pointsUsers(year),db().prepare("SELECT m.id,m.status,m.deadline,m.version,m.report,COALESCE(c.mode,'auto') AS registration_mode FROM months m LEFT JOIN registration_controls c ON c.month=m.id WHERE m.id LIKE ? OR m.id BETWEEN ? AND ? ORDER BY m.id").bind(`${year}-%`,enrollmentStart,enrollmentEnd).all(),
+  db().prepare(`SELECT * FROM submissions WHERE (month LIKE ? OR month BETWEEN ? AND ?) ${admin?"":"AND user_id=?"}`).bind(`${year}-%`,enrollmentStart,enrollmentEnd,...(!admin?[user.id]:[])).all(),
   db().prepare(`SELECT s.* FROM shifts s JOIN months m ON m.id=s.month WHERE s.month LIKE ? ${admin?"":"AND m.status IN ('filling','draft','published','completed')"} ORDER BY s.date`).bind(`${year}-%`).all(),
   db().prepare("SELECT * FROM swaps WHERE requester=? OR recipient=? ORDER BY created DESC LIMIT 100").bind(user.id,user.id).all(),
   db().prepare("SELECT id,message,read,created FROM notifications WHERE user_id=? ORDER BY created DESC LIMIT 100").bind(user.id).all(),holidaysFor(year),
@@ -58,7 +60,7 @@ export async function GET(request:Request){try{
   holidayCalendar(year)
  ]);
  const [users,months,submissions,shifts,swaps,notifications,holidays,futureShifts,events,suggestion,calendar]=results;
- return json({me:safeUser(user),setupComplete,emailReady,doctors:await publicDoctors(),accountResetPending:admin&&!await db().prepare("SELECT value FROM settings WHERE key='accounts_reset_v2'").first(),suggestedMonth:suggestion?.id??null,users:users.map(u=>({id:u.id,name:u.name,role:isAdmin(u)?"admin":"doctor",active:u.active,listed:u.listed,registered:u.registered,points:u.points,base_points:u.base_points,credited_shifts:u.credited_shifts,...(admin?{email:u.registered?u.email:undefined}:{})})),months:months.results.map(m=>({...m,report:admin?parseJSON(String(m.report),{}):{}})),submissions:submissions.results.map(s=>({...s,preferred:parseJSON(String(s.preferred),[]),available:parseJSON(String(s.available),[])})),shifts:shifts.results,swaps:swaps.results,notifications:notifications.results,holidays,holidayPoints:calendar.holidayPoints,futureShifts:futureShifts.results,events:events.results,today:todayRO(),dutyDate:dutyDateRO()});
+ return json({me:safeUser(user),setupComplete,emailReady,...(admin?{mail}:{}),doctors:await publicDoctors(),accountResetPending:admin&&!await db().prepare("SELECT value FROM settings WHERE key='accounts_reset_v2'").first(),suggestedMonth:suggestion?.id??null,users:users.map(u=>({id:u.id,name:u.name,role:isAdmin(u)?"admin":"doctor",active:u.active,listed:u.listed,registered:u.registered,points:u.points,base_points:u.base_points,credited_shifts:u.credited_shifts,...(admin?{email:u.registered?u.email:undefined}:{})})),months:months.results.map(m=>({...m,report:admin?parseJSON(String(m.report),{}):{}})),submissions:submissions.results.map(s=>({...s,preferred:parseJSON(String(s.preferred),[]),available:parseJSON(String(s.available),[])})),shifts:shifts.results,swaps:swaps.results,notifications:notifications.results,holidays,holidayPoints:calendar.holidayPoints,futureShifts:futureShifts.results,events:events.results,today:todayRO(),dutyDate:dutyDateRO()});
  }catch(error){return onError(error);}}
 
 export async function POST(request:Request){try{
@@ -106,12 +108,11 @@ export async function POST(request:Request){try{
  }
  if(action==="forgot"){
   const c=z.object({email:emailSchema}).parse(body);await rateLimit(request,`forgot:${await digest(c.email)}`,5);
-  if(!runtime("RESEND_API_KEY")||!runtime("MAIL_FROM"))fail("Recuperarea prin email nu este încă activată. Solicită administratorului resetarea parolei.",503);
+  if(!(await mailStatus()).configured)fail("Recuperarea prin email necesită activarea serviciului de email în Administrare, o singură dată pentru întreaga echipă.",503);
   const u=await db().prepare("SELECT * FROM users WHERE email=? AND listed=1 AND active=1 AND password<>''").bind(c.email).first<User>();
   if(u){const token=randomToken();const hashed=await digest(token);await db().batch([db().prepare("DELETE FROM resets WHERE user_id=?").bind(u.id),db().prepare("INSERT INTO resets (token,user_id,expires) VALUES (?,?,?)").bind(hashed,u.id,Date.now()+1800000)]);
-   const link=`${runtime("SITE_ORIGIN")||url.origin}/?reset=${encodeURIComponent(token)}`;
-   const sent=await fetch("https://api.resend.com/emails",{method:"POST",headers:{"Authorization":`Bearer ${runtime("RESEND_API_KEY")}`,"Content-Type":"application/json"},body:JSON.stringify({from:runtime("MAIL_FROM"),to:[u.email],subject:"Garda · Resetarea parolei",text:`Ai solicitat resetarea parolei. Deschide linkul în următoarele 30 de minute:\n${link}\nDacă nu ai solicitat resetarea, ignoră acest email.`})});
-   if(!sent.ok){console.error("Mail delivery failed",sent.status);await db().prepare("DELETE FROM resets WHERE token=?").bind(hashed).run();fail("Emailul nu a putut fi trimis. Reîncearcă mai târziu.",503);}
+   const link=`${url.origin}/?reset=${encodeURIComponent(token)}`;
+   try{await sendPasswordReset(u.email,link);}catch(error){await db().prepare("DELETE FROM resets WHERE token=?").bind(hashed).run();throw error;}
   }return json({ok:true,message:"Dacă există un cont cu această adresă, vei primi un link de resetare."});
  }
  if(action==="reset"){
@@ -128,8 +129,7 @@ export async function POST(request:Request){try{
  if(action==="read-notifications"){await db().prepare("UPDATE notifications SET read=1 WHERE user_id=?").bind(user.id).run();return json({ok:true});}
  if(action==="submit"){
   const c=z.object({month:monthSchema,preferred:z.array(z.number().int()).max(31),available:z.array(z.number().int()).max(31)}).parse(body);try{validateSelection(c.month,c.preferred,c.available);}catch(error){fail((error as Error).message);}
-  const m=await getMonth(c.month);if(m.status!=="open"||m.deadline&&m.deadline<=now())fail("Perioada de înscriere este închisă.",409);
-  if(registrationStage(c.month)!=="open")fail("Înscrierile inițiale sunt permise între 1 și 15 ale lunii precedente.",409);
+  const m=await getMonth(c.month);if(!initialRegistrationOpen(m))fail("Perioada de înscriere este închisă. Deschiderea automată este pe 1, la 08:00, ora României, sau anticipat de către administrator.",409);
   if(c.preferred.length>=2&&!c.preferred.some(d=>isWeekend(dateKey(c.month,d)))&&await weekendAvailable(c.month,user.id))fail("Pentru 2–4 gărzi, alege cel puțin o preferință în weekend. Excepția se aplică doar când toate weekendurile sunt deja acoperite.");
   const op=uuid();const r=await db().batch([db().prepare("UPDATE months SET version=version+1,mutation=? WHERE id=? AND status='open' AND (deadline IS NULL OR deadline>?)").bind(op,c.month,now()),db().prepare("INSERT INTO submissions (id,month,user_id,preferred,available,updated) SELECT ?,?,?,?,?,? WHERE EXISTS(SELECT 1 FROM months WHERE id=? AND mutation=?) ON CONFLICT(id) DO UPDATE SET preferred=excluded.preferred,available=excluded.available,updated=excluded.updated").bind(`${c.month}:${user.id}`,c.month,user.id,JSON.stringify(c.preferred),JSON.stringify(c.available),now(),c.month,op),db().prepare("INSERT INTO audit (id,user_id,action,created) SELECT ?,?,?,? WHERE EXISTS(SELECT 1 FROM months WHERE id=? AND mutation=?)").bind(uuid(),user.id,`Preferințe salvate: ${c.month}`,now(),c.month,op)]);if(!r[0].meta.changes)fail("Înscrierile s-au închis între timp.",409);return json({ok:true});
  }
@@ -166,6 +166,11 @@ export async function POST(request:Request){try{
   await db().batch([notification(s.requester,`${user.name} a acceptat schimbul ${dateLabel(s.from_date)} ↔ ${dateLabel(s.to_date)}.`),notification(s.recipient,"Schimbul a fost acceptat. Programul a fost actualizat."),audit(user.id,`Schimb acceptat: ${s.from_date} ↔ ${s.to_date}`)]);return json({ok:true});
  }
  if(!isAdmin(user))fail("Această acțiune este disponibilă doar administratorului.",403);
+ if(action==="mail-settings"){
+  const c=z.object({from:emailSchema,key:z.string().trim().max(300).default("")}).parse(body);
+  if(c.key&&!/^re_[A-Za-z0-9_-]+$/.test(c.key))fail("Introdu o cheie API Resend validă, care începe cu re_.");
+  await saveMailConfig(c.from,c.key);await audit(user.id,"Configurare email de recuperare actualizată").run();return json({ok:true});
+ }
  if(action==="doctor-add"){
   const c=z.object({name:z.string().trim().min(2).max(80)}).parse(body);
   const doctors=(await db().prepare("SELECT id,name,listed FROM users ORDER BY listed DESC,created").all()).results as {id:string;name:string;listed:number}[];
@@ -197,18 +202,21 @@ export async function POST(request:Request){try{
   const c=z.object({date:dateSchema,label:z.string().trim().min(2).max(100),enabled:z.number().int().min(0).max(1),points:z.union([z.literal(5),z.literal(10)]).default(5)}).parse(body);
   const m=await db().prepare("SELECT status FROM months WHERE id=?").bind(c.date.slice(0,7)).first<Month>();if(m&&["filling","draft","published","completed"].includes(m.status))fail("Modifică sărbătorile înainte de generarea programului.");await db().batch([db().prepare("INSERT INTO holidays (date,label,enabled) VALUES (?,?,?) ON CONFLICT(date) DO UPDATE SET label=excluded.label,enabled=excluded.enabled").bind(c.date,c.label,c.enabled),db().prepare("INSERT INTO holiday_points(date,points) VALUES(?,?) ON CONFLICT(date) DO UPDATE SET points=excluded.points").bind(c.date,c.points),audit(user.id,`Sărbătoare actualizată: ${c.date}, ${c.points} P`)]);return json({ok:true});
  }
- if(action==="month-open"){
-  const c=z.object({month:monthSchema,deadline:z.string().datetime().nullable()}).parse(body);if(c.month<todayRO().slice(0,7))fail("Poți deschide luna curentă sau o lună viitoare.");if(c.deadline&&c.deadline<=now())fail("Termenul trebuie să fie în viitor.");
-  if(registrationStage(c.month)!=="open")fail("Înscrierile acestei luni se deschid pe 1 și se închid pe 15 ale lunii precedente.");const deadline=bucharestTimestamp(registrationDates(c.month).close);
-  const m=await db().prepare("SELECT * FROM months WHERE id=?").bind(c.month).first<Month>();if(m&&["published","completed"].includes(m.status))fail("Un program definitiv nu poate fi redeschis. Folosește cererile de schimb.");
-  if(m)await mutation(m,"open",op=>[db().prepare("UPDATE months SET deadline=?,report='{}' WHERE id=? AND mutation=?").bind(deadline,c.month,op),db().prepare("DELETE FROM shifts WHERE month=? AND EXISTS(SELECT 1 FROM months WHERE id=? AND mutation=?)").bind(c.month,c.month,op)],user,`Înscrieri deschise: ${c.month}`);
-  else await db().batch([db().prepare("INSERT INTO months (id,status,deadline,version,report) VALUES (?,'open',?,0,'{}')").bind(c.month,deadline),audit(user.id,`Înscrieri deschise: ${c.month}`)]);
-  await broadcastNotification(`S-au deschis înscrierile pentru ${monthTitle(c.month)}.`).run();return json({ok:true});
+ if(["month-control","month-open","month-close"].includes(action)){
+  const c=z.object({month:monthSchema,mode:z.enum(["auto","open","closed"]).optional(),version:z.number().int().optional()}).parse(body);
+  const first=shiftMonth(todayRO().slice(0,7),1);if(c.month<first||c.month>shiftMonth(first,2))fail("Poți administra înscrierile pentru următoarele trei luni.");
+  const m=await getMonth(c.month);if(c.version!==undefined)guard(m,c.version);
+  if(!["locked","open","closed"].includes(m.status))fail("Programul este deja în repartizare sau definitivat. Înscrierile inițiale nu mai pot fi redeschise.",409);
+  const stage=registrationStage(c.month);if(stage!=="early"&&stage!=="open")fail("Termenul înscrierilor inițiale a trecut. Urmează etapa zilelor neacoperite.",409);
+  const mode=action==="month-open"?"open":action==="month-close"?"closed":c.mode;if(!mode)fail("Alege modul înscrierilor.");
+  const status=mode==="auto"?(stage==="early"?"locked":"open"):mode,deadline=status==="open"?bucharestTimestamp(registrationDates(c.month).close):null;
+  await mutation(m,status,op=>[
+   db().prepare("INSERT INTO registration_controls(month,mode,updated) SELECT ?,?,? WHERE EXISTS(SELECT 1 FROM months WHERE id=? AND mutation=?) ON CONFLICT(month) DO UPDATE SET mode=excluded.mode,updated=excluded.updated").bind(c.month,mode,now(),m.id,op),
+   db().prepare("UPDATE months SET deadline=? WHERE id=? AND mutation=?").bind(deadline,m.id,op),
+   ...((status==="open"||status==="closed")&&status!==m.status?[db().prepare("INSERT INTO notifications(id,user_id,message,read,created) SELECT lower(hex(randomblob(16))),id,?,0,? FROM users WHERE active=1 AND listed=1 AND password<>'' AND EXISTS(SELECT 1 FROM months WHERE id=? AND mutation=?)").bind(`${status==="open"?"S-au deschis":"S-au închis"} înscrierile pentru ${monthTitle(c.month)}.`,now(),m.id,op)]:[])
+  ],user,`Înscrieri ${c.month}: ${mode==="auto"?"automat":mode==="open"?"deschise manual":"închise manual"}`);return json({ok:true});
  }
  const c=z.object({month:monthSchema,version:z.number().int()}).parse(body);const m=await getMonth(c.month);guard(m,c.version);
- if(action==="month-close"){
-  if(m.status!=="open")fail("Luna nu este deschisă pentru înscrieri.");await mutation(m,"closed",op=>[db().prepare("INSERT INTO notifications(id,user_id,message,read,created) SELECT lower(hex(randomblob(16))),id,?,0,? FROM users WHERE active=1 AND listed=1 AND password<>'' AND EXISTS(SELECT 1 FROM months WHERE id=? AND mutation=?)").bind(`S-au închis înscrierile pentru ${monthTitle(c.month)}.`,now(),m.id,op)],user,`Înscrieri închise: ${c.month}`);return json({ok:true});
- }
  if(action==="generate"){
   if(!["closed","filling","draft"].includes(m.status))fail("Închide înscrierile înainte de generarea programului.");const stage=registrationStage(c.month);if(stage==="early"||stage==="open")fail("Programul inițial se generează pe 15; repartizarea din coada clasamentului începe pe 17.");
   const force=stage!=="filling",locked=(await db().prepare("SELECT date,user_id,points,reason FROM shifts WHERE month=?").bind(c.month).all()).results as {date:string;user_id:string;points:number;reason:string}[];
