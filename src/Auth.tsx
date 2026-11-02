@@ -28,6 +28,7 @@ export function Auth({ data, setupToken, resetToken, onDone, loadError }: { data
     const doctor = data.doctors.find(d => d.name === String(form.get("username") ?? doctorName));
     if (!["forgot", "reset"].includes(effective) && !doctor) { setError("Selectează numele tău din lista de medici."); return; }
     if (effective === "owner-needed") return;
+    if (effective === "reset" && form.get("password") !== form.get("confirm")) { setError("Parolele nu coincid."); return; }
     const action = effective === "login" && doctor && !doctor.registered ? "register" : effective;
     setBusy(true); setError(""); setMessage("");
     try {
@@ -42,7 +43,7 @@ export function Auth({ data, setupToken, resetToken, onDone, loadError }: { data
     finally { setBusy(false); }
   };
   const titles: Record<string, string> = { login: "Bine ai venit", register: "Activează contul tău", forgot: "Ai uitat parola?", reset: "Alege o parolă nouă", setup: "Configurează administratorul", "owner-needed": "Contul administratorului" };
-  const descriptions: Record<string, string> = { login: "Alege medicul și introdu parola. Browserul îți poate salva datele de autentificare.", register: "La prima accesare, adaugă emailul de recuperare și alege parola.", forgot: "Introdu emailul de recuperare asociat contului tău.", reset: "Linkul poate fi folosit o singură dată.", setup: "Pecie Mihai este singurul administrator al echipei.", "owner-needed": "Folosește linkul privat de configurare pentru contul Pecie Mihai." };
+  const descriptions: Record<string, string> = { login: "Alege medicul și introdu parola. Browserul îți poate salva datele de autentificare.", register: "La prima accesare, adaugă emailul de recuperare și alege parola.", forgot: "Introdu adresa de email adăugată la activarea contului. Vei primi un link pentru a alege singur o parolă nouă.", reset: "Linkul poate fi folosit o singură dată.", setup: "Pecie Mihai este singurul administrator al echipei.", "owner-needed": "Folosește linkul privat de configurare pentru contul Pecie Mihai." };
   return <div className="auth-shell">
     <header><div className="brand"><img className="hospital-logo" src="/hospital-logo.svg?v=emblem-20261012" alt="Simbolul Băneasa Tumor Center Hospital" width={48} height={48}/><span>Garda<span className="brand-sub">Programarea gărzilor</span></span></div></header>
     <main className="auth-layout">
@@ -55,10 +56,11 @@ export function Auth({ data, setupToken, resetToken, onDone, loadError }: { data
           {!["forgot", "reset"].includes(effective) && <label>Medicul<select id="garda-username" name="username" autoComplete="username" value={setup ? owner?.name ?? "" : doctorName} onChange={event => { const name = event.target.value; setDoctorName(name); const doctor = data.doctors.find(d => d.name === name); if (doctor) rememberDoctor(doctor.id); setError(""); setMessage(""); }} required><option value="" disabled>Alege numele din listă</option>{data.doctors.map(d => <option key={d.id} value={d.name} disabled={setup && !d.administrator}>{d.name}</option>)}</select></label>}
           {["register", "setup", "forgot"].includes(effective) && <label>{effective === "forgot" ? "Email de recuperare" : "Adresă de email pentru recuperarea parolei"}<input name="email" type="email" required autoComplete="email" defaultValue={effective === "setup" ? ADMIN_EMAIL : ""} readOnly={effective === "setup"} placeholder="nume@exemplu.ro"/></label>}
           {!["forgot", "owner-needed"].includes(effective) && <label>Parolă<div className="password-input"><input name="password" type={show ? "text" : "password"} required minLength={effective === "login" ? 1 : 10} maxLength={128} autoComplete={effective === "login" ? "current-password" : "new-password"} placeholder={effective === "login" ? "Parola ta" : "Minimum 10 caractere"}/><button type="button" aria-label={show ? "Ascunde parola" : "Arată parola"} onClick={() => setShow(!show)}>{show ? <EyeOff size={18}/> : <Eye size={18}/>}</button></div></label>}
-          {effective === "login" && <button type="button" className="text-btn forgot" onClick={() => { setMode("forgot"); setError(""); }}>Am uitat parola</button>}
+          {effective === "reset" && <label>Confirmă parola nouă<input name="confirm" type="password" required minLength={10} maxLength={128} autoComplete="new-password"/></label>}
+          {effective === "login" && <button type="button" className="text-btn forgot" onClick={() => { setMode("forgot"); setError(""); }}>Am uitat parola · link pe email</button>}
           {effective !== "owner-needed" && <button className="btn primary full" disabled={busy || effective !== "reset" && effective !== "forgot" && !data.setupComplete && !setup}>{busy ? "Se procesează…" : effective === "login" ? "Autentificare" : effective === "register" ? "Activează contul" : effective === "setup" ? "Configurează echipa" : effective === "forgot" ? "Trimite linkul de resetare" : "Salvează parola"}</button>}
         </form>
-        {effective === "forgot" && !data.emailReady && <p className="recovery-note"><Mail size={16}/>Trimiterea emailurilor nu este activată încă. Administratorul poate genera un link de resetare.</p>}
+        {effective === "forgot" && !data.emailReady && <p className="recovery-note"><Mail size={16}/>Serviciul de email trebuie conectat o singură dată pentru întreaga echipă. După activare, linkul îți este trimis automat.</p>}
         {!setupToken && !resetToken && <div className="auth-switch">{mode === "forgot" ? <button className="text-btn" onClick={() => { setMode("login"); setError(""); setMessage(""); }}>Înapoi la autentificare</button> : <span>Nu ești în listă? Solicită administratorului să te adauge.</span>}</div>}
       </section>
     </main><footer className="auth-footer">Garda · Acces pe laptop, Android și iPhone</footer>
