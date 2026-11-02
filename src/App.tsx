@@ -47,7 +47,15 @@ export default function GardaApp(){
   if(next.me?.active&&initialUser.current!==next.me.id){initialUser.current=next.me.id;const current=next.today.slice(0,7);setMonth(current);if(Number(current.slice(0,4))!==year)setYear(Number(current.slice(0,4)));setTab("preview");}
 
  }catch(e){setLoadError((e as Error).message);setLoaded(true);}},[year]);
- useEffect(()=>{const q=new URLSearchParams(location.search);setSetupToken(q.get("setup")??"");setResetToken(q.get("reset")??"");if(q.get("notifications")==="1")setNotificationsOpen(true);void load();const id=setInterval(()=>void load(),30000);const focus=()=>void load();window.addEventListener("focus",focus);return()=>{clearInterval(id);window.removeEventListener("focus",focus);};},[load]);
+ useEffect(()=>{
+  const q=new URLSearchParams(location.search);setSetupToken(q.get("setup")??"");setResetToken(q.get("reset")??"");
+  const clickedAt=Number(q.get("notification-clicked")),age=Date.now()-clickedAt;
+  const fromPushClick=q.get("notifications")==="1"&&clickedAt>0&&age>=0&&age<60000;
+  // Consume notification intent once; old bookmarks and year changes cannot reopen the dialog.
+  if(q.has("notifications")||q.has("notification-clicked")){q.delete("notifications");q.delete("notification-clicked");const search=q.toString();history.replaceState(history.state,"",location.pathname+(search?"?"+search:"")+location.hash);}
+  if(fromPushClick)setNotificationsOpen(true);
+ },[]);
+ useEffect(()=>{void load();const id=setInterval(()=>void load(),30000);const focus=()=>void load();window.addEventListener("focus",focus);return()=>{clearInterval(id);window.removeEventListener("focus",focus);};},[load]);
  const act=async(action:string,values:Record<string,unknown>={},message="Modificările au fost salvate.")=>{setBusy(true);try{const result=await api(action,values);await load();window.dispatchEvent(new Event("garda-data-changed"));if(message)toast.success(message);return result;}catch(e){toast.error((e as Error).message);throw e;}finally{setBusy(false);}};
  const attempt=(promise:Promise<unknown>)=>void promise.catch(()=>{});
  const bridge=useRef({data,month,act});bridge.current={data,month,act};
