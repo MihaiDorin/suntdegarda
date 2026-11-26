@@ -52,7 +52,7 @@ export async function GET(request:Request){try{
   pointsUsers(year),db().prepare("SELECT m.id,m.status,m.deadline,m.version,m.report,COALESCE(c.mode,'auto') AS registration_mode FROM months m LEFT JOIN registration_controls c ON c.month=m.id WHERE m.id LIKE ? OR m.id BETWEEN ? AND ? ORDER BY m.id").bind(`${year}-%`,enrollmentStart,enrollmentEnd).all(),
   db().prepare(`SELECT * FROM submissions WHERE (month LIKE ? OR month BETWEEN ? AND ?) ${admin?"":"AND user_id=?"}`).bind(`${year}-%`,enrollmentStart,enrollmentEnd,...(!admin?[user.id]:[])).all(),
   db().prepare(`SELECT s.* FROM shifts s JOIN months m ON m.id=s.month WHERE s.month LIKE ? ${admin?"":"AND m.status IN ('filling','draft','published','completed')"} ORDER BY s.date`).bind(`${year}-%`).all(),
-  db().prepare("SELECT * FROM swaps WHERE requester=? OR recipient=? ORDER BY created DESC LIMIT 100").bind(user.id,user.id).all(),
+  db().prepare("SELECT id,from_date,to_date,requester,recipient,created,CASE WHEN from_date=to_date THEN 'handoff' ELSE 'swap' END AS kind,CASE WHEN status='pending' AND min(from_date,to_date)<=? THEN 'expired' ELSE status END AS status FROM swaps WHERE requester=? OR recipient=? ORDER BY created DESC LIMIT 100").bind(todayRO(),user.id,user.id).all(),
   db().prepare("SELECT id,message,read,created FROM notifications WHERE user_id=? ORDER BY created DESC LIMIT 100").bind(user.id).all(),holidaysFor(year),
   db().prepare("SELECT s.* FROM shifts s JOIN months m ON m.id=s.month WHERE m.status IN ('filling','draft','published') AND s.date>=? ORDER BY s.date LIMIT 1200").bind(todayRO()).all(),
   admin?db().prepare("SELECT a.action,a.created,u.name FROM audit a LEFT JOIN users u ON u.id=a.user_id ORDER BY a.created DESC LIMIT 40").all():Promise.resolve({results:[]}),
@@ -143,6 +143,26 @@ export async function POST(request:Request){try{
   await notification(user.id,"Ai preluat garda din "+dateLabel(date)+".").run();return json({ok:true});
  }
  if(action==="refuse-shift"){const c=z.object({date:dateSchema}).parse(body);return json(await refuseAssignedShift(c.date,user));}
+ // A handoff has one date. Ordinary swaps have always required two distinct dates.
+ if(action==="handoff-request"){
+  const {from,recipient}=z.object({from:dateSchema,recipient:z.string().min(1).max(128)}).parse(body);
+  if(from<=todayRO())fail("Poți ceda numai o gardă viitoare.");
+  if(recipient===user.id)fail("Alege un alt medic.");
+  await assertNoConsecutive(from,recipient);
+  const id=uuid(),created=now();
+  const result=await db().batch([
+   db().prepare(`INSERT INTO swaps(id,from_date,to_date,requester,recipient,status,created)
+    SELECT ?,s.date,s.date,s.user_id,u.id,'pending',? FROM shifts s JOIN months m ON m.id=s.month JOIN users u ON u.id=?
+    WHERE s.date=? AND s.user_id=? AND s.completed=0 AND m.status IN ('filling','draft','published')
+    AND u.active=1 AND u.listed=1 AND u.password<>'' AND NOT EXISTS
+    (SELECT 1 FROM shifts n WHERE n.user_id=u.id AND n.date IN (date(s.date,'-1 day'),date(s.date,'+1 day')))
+    AND NOT EXISTS (SELECT 1 FROM swaps q WHERE q.from_date=s.date AND q.to_date=s.date AND q.requester=s.user_id AND q.recipient=u.id AND q.status='pending')`).bind(id,created,recipient,from,user.id),
+   db().prepare("INSERT INTO notifications(id,user_id,message,read,created) SELECT ?,recipient,?,0,? FROM swaps WHERE id=?").bind(uuid(),`${user.name} îți propune să preiei garda din ${dateLabel(from)}, fără gardă la schimb.`,created,id),
+   db().prepare("INSERT INTO audit(id,user_id,action,created) SELECT ?,requester,?,? FROM swaps WHERE id=?").bind(uuid(),"Cerere de cedare: "+from,created,id)
+  ]);
+  if(!result[0].meta.changes)fail("Cererea nu poate fi trimisă. Verifică dacă garda îți aparține, colegul este disponibil și nu există deja aceeași cerere.",409);
+  return json({ok:true});
+ }
  if(action==="swap-request"){
   const c=z.object({from:dateSchema,to:dateSchema}).parse(body);if(c.from===c.to||c.from<=todayRO()||c.to<=todayRO())fail("Schimburile sunt permise doar pentru două zile viitoare distincte.");
   const shifts=(await db().prepare("SELECT s.* FROM shifts s JOIN months m ON m.id=s.month WHERE s.date IN (?,?) AND m.status IN ('filling','draft','published') AND s.completed=0").bind(c.from,c.to).all()).results as Shift[];
@@ -155,13 +175,33 @@ export async function POST(request:Request){try{
  if(action==="swap-answer"){
   const c=z.object({id:z.string(),answer:z.enum(["accept","decline","cancel"])}).parse(body);const s=await db().prepare("SELECT * FROM swaps WHERE id=? AND status='pending'").bind(c.id).first<Swap>();if(!s)fail("Cererea nu mai este în așteptare.",409);
   if(c.answer==="cancel"?s.requester!==user.id:s.recipient!==user.id)fail("Nu poți răspunde la această cerere.",403);
-  if(c.answer!=="accept"){const status=c.answer==="cancel"?"cancelled":"declined";const r=await db().prepare("UPDATE swaps SET status=? WHERE id=? AND status='pending'").bind(status,s.id).run();if(!r.meta.changes)fail("Cererea a fost deja soluționată.",409);await db().batch([notification(c.answer==="cancel"?s.recipient:s.requester,`${user.name} ${c.answer==="cancel"?"a anulat":"a refuzat"} schimbul ${dateLabel(s.from_date)} ↔ ${dateLabel(s.to_date)}.`),audit(user.id,`Schimb ${status}: ${s.from_date} ↔ ${s.to_date}`)]);return json({ok:true});}
+  const handoff=s.from_date===s.to_date;
+  const description=handoff?`cedarea gărzii din ${dateLabel(s.from_date)}`:`schimbul ${dateLabel(s.from_date)} ↔ ${dateLabel(s.to_date)}`;
+  if(c.answer!=="accept"){const status=c.answer==="cancel"?"cancelled":"declined";const r=await db().prepare("UPDATE swaps SET status=? WHERE id=? AND status='pending'").bind(status,s.id).run();if(!r.meta.changes)fail("Cererea a fost deja soluționată.",409);await db().batch([notification(c.answer==="cancel"?s.recipient:s.requester,`${user.name} ${c.answer==="cancel"?"a anulat":"a refuzat"} ${description}.`),audit(user.id,`${handoff?"Cedare":"Schimb"} ${status}: ${description}`)]);return json({ok:true});}
   if(s.from_date<=todayRO()||s.to_date<=todayRO())fail("O gardă din cerere a început deja.",409);
+  if(handoff){
+   const op="handoff:"+uuid(),created=now();
+   const result=await db().batch([
+    db().prepare(`UPDATE swaps SET status=? WHERE id=? AND status='pending'
+      AND EXISTS(SELECT 1 FROM shifts x JOIN months m ON m.id=x.month WHERE x.date=swaps.from_date AND x.user_id=swaps.requester AND x.completed=0 AND m.status IN ('filling','draft','published'))
+      AND EXISTS(SELECT 1 FROM users u WHERE u.id=swaps.recipient AND u.active=1 AND u.listed=1 AND u.password<>'')
+      AND NOT EXISTS(SELECT 1 FROM shifts n WHERE n.user_id=swaps.recipient AND n.date IN (date(swaps.from_date,'-1 day'),date(swaps.from_date,'+1 day')))`).bind(op,s.id),
+    db().prepare("UPDATE shifts SET user_id=?,reason='Cedare acceptată' WHERE date=? AND EXISTS(SELECT 1 FROM swaps WHERE id=? AND status=?)").bind(s.recipient,s.from_date,s.id,op),
+    db().prepare("UPDATE months SET version=version+1 WHERE id=? AND EXISTS(SELECT 1 FROM swaps WHERE id=? AND status=?)").bind(s.from_date.slice(0,7),s.id,op),
+    db().prepare("UPDATE swaps SET status='expired' WHERE status='pending' AND (from_date=? OR to_date=?) AND EXISTS(SELECT 1 FROM swaps WHERE id=? AND status=?)").bind(s.from_date,s.from_date,s.id,op),
+    db().prepare("INSERT INTO notifications(id,user_id,message,read,created) SELECT ?,requester,?,0,? FROM swaps WHERE id=? AND status=?").bind(uuid(),`${user.name} a preluat garda ta din ${dateLabel(s.from_date)}.`,created,s.id,op),
+    db().prepare("INSERT INTO audit(id,user_id,action,created) SELECT ?,recipient,?,? FROM swaps WHERE id=? AND status=?").bind(uuid(),"Cedare acceptată: "+s.from_date,created,s.id,op),
+    db().prepare("UPDATE swaps SET status='accepted' WHERE id=? AND status=?").bind(s.id,op),
+    db().prepare("UPDATE swaps SET status='expired' WHERE id=? AND status='pending'").bind(s.id)
+   ]);
+   if(!result[0].meta.changes)fail("Cererea nu mai este disponibilă: garda a fost modificată sau preluarea ar crea două gărzi consecutive.",409);
+   return json({ok:true});
+  }
   await assertNoConsecutive(s.to_date,s.requester,[s.from_date,s.to_date]);await assertNoConsecutive(s.from_date,s.recipient,[s.from_date,s.to_date]);
   const originals=(await db().prepare("SELECT * FROM shifts WHERE date IN (?,?)").bind(s.from_date,s.to_date).all()).results as Shift[];
   const fromOriginal=originals.find(x=>x.date===s.from_date),toOriginal=originals.find(x=>x.date===s.to_date);if(!fromOriginal||!toOriginal)fail("Programul s-a schimbat între timp.",409);
   const op=`accepting:${uuid()}`;
-  const r=await db().batch([db().prepare("UPDATE swaps SET status=? WHERE id=? AND status='pending' AND (SELECT COUNT(*) FROM shifts x JOIN months m ON m.id=x.month WHERE ((x.date=? AND x.user_id=?) OR (x.date=? AND x.user_id=?)) AND x.completed=0 AND m.status IN ('filling','draft','published'))=2").bind(op,s.id,s.from_date,s.requester,s.to_date,s.recipient),db().prepare("DELETE FROM shifts WHERE date IN (?,?) AND EXISTS(SELECT 1 FROM swaps WHERE id=? AND status=?)").bind(s.from_date,s.to_date,s.id,op),db().prepare("INSERT INTO shifts(date,month,user_id,points,reason,completed) SELECT ?,?,?,?,'Schimb acceptat',0 WHERE EXISTS(SELECT 1 FROM swaps WHERE id=? AND status=?)").bind(s.from_date,s.from_date.slice(0,7),s.recipient,fromOriginal.points,s.id,op),db().prepare("INSERT INTO shifts(date,month,user_id,points,reason,completed) SELECT ?,?,?,?,'Schimb acceptat',0 WHERE EXISTS(SELECT 1 FROM swaps WHERE id=? AND status=?)").bind(s.to_date,s.to_date.slice(0,7),s.requester,toOriginal.points,s.id,op),db().prepare("UPDATE months SET version=version+1 WHERE id IN (?,?) AND EXISTS(SELECT 1 FROM swaps WHERE id=? AND status=?)").bind(s.from_date.slice(0,7),s.to_date.slice(0,7),s.id,op),db().prepare("UPDATE swaps SET status='accepted' WHERE id=? AND status=?").bind(s.id,op)]);
+  const r=await db().batch([db().prepare("UPDATE swaps SET status=? WHERE id=? AND status='pending' AND (SELECT COUNT(*) FROM shifts x JOIN months m ON m.id=x.month WHERE ((x.date=? AND x.user_id=?) OR (x.date=? AND x.user_id=?)) AND x.completed=0 AND m.status IN ('filling','draft','published'))=2 AND NOT EXISTS(SELECT 1 FROM shifts n WHERE n.date NOT IN (swaps.from_date,swaps.to_date) AND ((n.user_id=swaps.recipient AND n.date IN (date(swaps.from_date,'-1 day'),date(swaps.from_date,'+1 day'))) OR (n.user_id=swaps.requester AND n.date IN (date(swaps.to_date,'-1 day'),date(swaps.to_date,'+1 day')))))").bind(op,s.id,s.from_date,s.requester,s.to_date,s.recipient),db().prepare("DELETE FROM shifts WHERE date IN (?,?) AND EXISTS(SELECT 1 FROM swaps WHERE id=? AND status=?)").bind(s.from_date,s.to_date,s.id,op),db().prepare("INSERT INTO shifts(date,month,user_id,points,reason,completed) SELECT ?,?,?,?,'Schimb acceptat',0 WHERE EXISTS(SELECT 1 FROM swaps WHERE id=? AND status=?)").bind(s.from_date,s.from_date.slice(0,7),s.recipient,fromOriginal.points,s.id,op),db().prepare("INSERT INTO shifts(date,month,user_id,points,reason,completed) SELECT ?,?,?,?,'Schimb acceptat',0 WHERE EXISTS(SELECT 1 FROM swaps WHERE id=? AND status=?)").bind(s.to_date,s.to_date.slice(0,7),s.requester,toOriginal.points,s.id,op),db().prepare("UPDATE months SET version=version+1 WHERE id IN (?,?) AND EXISTS(SELECT 1 FROM swaps WHERE id=? AND status=?)").bind(s.from_date.slice(0,7),s.to_date.slice(0,7),s.id,op),db().prepare("UPDATE swaps SET status='expired' WHERE status='pending' AND (from_date IN (?,?) OR to_date IN (?,?)) AND EXISTS(SELECT 1 FROM swaps WHERE id=? AND status=?)").bind(s.from_date,s.to_date,s.from_date,s.to_date,s.id,op),db().prepare("UPDATE swaps SET status='accepted' WHERE id=? AND status=?").bind(s.id,op)]);
   if(r[0].meta.changes!==1||r[1].meta.changes!==2||r[2].meta.changes!==1||r[3].meta.changes!==1){await db().prepare("UPDATE swaps SET status='expired' WHERE id=? AND status='pending'").bind(s.id).run();fail("Programul s-a schimbat între timp. Trimite o cerere nouă.",409);}
   await db().batch([notification(s.requester,`${user.name} a acceptat schimbul ${dateLabel(s.from_date)} ↔ ${dateLabel(s.to_date)}.`),notification(s.recipient,"Schimbul a fost acceptat. Programul a fost actualizat."),audit(user.id,`Schimb acceptat: ${s.from_date} ↔ ${s.to_date}`)]);return json({ok:true});
  }
@@ -225,7 +265,7 @@ export async function POST(request:Request){try{
  }
  if(action==="assign"){
   if(!["filling","draft","published"].includes(m.status))fail("Atribuirea manuală este disponibilă după înscrierea inițială.");const a=z.object({day:z.number().int().min(1).max(monthDays(c.month)),user_id:z.string()}).parse(body);
-  if(!await db().prepare("SELECT id FROM users WHERE id=? AND active=1 AND listed=1").bind(a.user_id).first())fail("Selectează un medic activ.");const date=dateKey(c.month,a.day);if(date<=todayRO())fail("Poți atribui doar o gardă viitoare.");if(m.status==="published"&&await db().prepare("SELECT date FROM shifts WHERE date=?").bind(date).first())fail("Folosește schimbul de gărzi pentru un program definitiv.");
+  if(!await db().prepare("SELECT id FROM users WHERE id=? AND active=1 AND listed=1").bind(a.user_id).first())fail("Selectează un medic activ.");const date=dateKey(c.month,a.day);if(date<=todayRO())fail("Poți atribui doar o gardă viitoare.");if(m.status==="published"&&await db().prepare("SELECT date FROM shifts WHERE date=?").bind(date).first())fail("Pentru un program definitiv, folosește secțiunea Schimbare/cedare gărzi.");
   if(m.status==="filling"){const target=await db().prepare("SELECT * FROM submissions WHERE month=? AND user_id=?").bind(c.month,a.user_id).first<Submission>();if(!target||![...parseJSON(target.preferred,[]) as number[],...parseJSON(target.available,[]) as number[]].includes(a.day))fail("În perioada 15–17, medicul trebuie să fi declarat disponibilitatea sau să preia personal ziua liberă.");}
   await assertNoConsecutive(date,a.user_id);const calendar=await holidayCalendar(Number(c.month.slice(0,4))),points=dayPoints(date,calendar.holidays,calendar.holidayPoints);await mutation(m,m.status,op=>[db().prepare("INSERT INTO shifts (date,month,user_id,points,reason,completed) SELECT ?,?,?,?,'Atribuire manuală',0 WHERE EXISTS(SELECT 1 FROM months WHERE id=? AND mutation=?) ON CONFLICT(date) DO UPDATE SET user_id=excluded.user_id,reason=excluded.reason,points=excluded.points").bind(date,c.month,a.user_id,points,c.month,op)],user,`Atribuire manuală: ${date}`);return json({ok:true});
  }
